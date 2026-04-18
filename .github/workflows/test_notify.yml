@@ -1,0 +1,29 @@
+name: Test Notification
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Send test text + email
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          NOTIFY_PHONE_CARRIER_EMAIL: ${{ secrets.NOTIFY_PHONE_CARRIER_EMAIL }}
+        run: |
+          python3 -c "
+from notify import send_email, send_free_sms
+ok_sms   = send_free_sms('PP Bot test — texts are working!')
+ok_email = send_email('PP Bot test', '<p>Email alerts are working!</p>', 'Email alerts are working!')
+print('SMS:', 'sent' if ok_sms else 'FAILED')
+print('Email:', 'sent' if ok_email else 'FAILED')
+"
