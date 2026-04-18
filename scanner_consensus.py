@@ -182,11 +182,16 @@ def find_consensus_edges(
         attrs   = proj.get("attributes", {})
         rels    = proj.get("relationships", {})
         pid     = rels.get("new_player", {}).get("data", {}).get("id", "")
-        p_info  = players.get(pid, {})
-        pname   = p_info.get("name", "")
+        pname   = players.get(pid, "")
+        if not pname:
+            continue
         stat    = attrs.get("stat_type", "")
-        league  = p_info.get("league", "")
-        lid     = p_info.get("league_id", 0)
+        lid     = rels.get("league", {}).get("data", {}).get("id", 0)
+        try:
+            lid = int(lid)
+        except (TypeError, ValueError):
+            lid = 0
+        league  = attrs.get("league", "") or str(lid)
 
         # Only standard lines for consensus comparison
         line_score = attrs.get("line_score")
