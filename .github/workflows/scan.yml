@@ -25,17 +25,17 @@ jobs:
 
       - name: Run PrizePicks scanner
         env:
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-          NOTIFY_FROM: ${{ secrets.NOTIFY_FROM }}
           NOTIFY_PHONE_CARRIER_EMAIL: ${{ secrets.NOTIFY_PHONE_CARRIER_EMAIL }}
         run: python3 auto_scan.py
 
       - name: Run Underdog scanner
         env:
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-          NOTIFY_FROM: ${{ secrets.NOTIFY_FROM }}
           NOTIFY_PHONE_CARRIER_EMAIL: ${{ secrets.NOTIFY_PHONE_CARRIER_EMAIL }}
         run: python3 scanner_underdog.py --auto
 

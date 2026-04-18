@@ -14,7 +14,10 @@ Reads credentials from environment variables (set in .env or Railway dashboard):
 """
 
 import os
+import smtplib
 import requests
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -30,10 +33,38 @@ NOTIFY_PHONE     = os.getenv("NOTIFY_PHONE", "")
 
 NOTIFY_PHONE_CARRIER_EMAIL = os.getenv("NOTIFY_PHONE_CARRIER_EMAIL", "")
 
+# Gmail SMTP (free, works for any destination including carrier gateways)
+GMAIL_USER         = os.getenv("GMAIL_USER", "")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
+
+
+def _send_via_gmail(to: str, subject: str, body: str) -> bool:
+    """Send email via Gmail SMTP. Works for any recipient including carrier gateways."""
+    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
+        return False
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = GMAIL_USER
+        msg["To"]      = to
+        msg.attach(MIMEText(body, "plain"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            smtp.sendmail(GMAIL_USER, to, msg.as_string())
+        return True
+    except Exception as e:
+        print(f"[notify] Gmail send failed: {e}")
+        return False
+
 
 def send_email(subject: str, html_body: str, plain_body: str = "") -> bool:
-    """Send an email via Resend. Returns True on success."""
-    if not RESEND_API_KEY or not NOTIFY_EMAIL:
+    """Send an alert email. Uses Gmail if configured, falls back to Resend."""
+    if not NOTIFY_EMAIL:
+        return False
+    # Gmail first (works without domain verification)
+    if GMAIL_USER and GMAIL_APP_PASSWORD:
+        return _send_via_gmail(NOTIFY_EMAIL, subject, plain_body or html_body)
+    if not RESEND_API_KEY:
         return False
 
     payload = {
@@ -60,7 +91,7 @@ def send_email(subject: str, html_body: str, plain_body: str = "") -> bool:
 
 
 def send_free_sms(message: str) -> bool:
-    """Send a free SMS via Resend to a carrier email gateway address.
+    """Send a free SMS via carrier email gateway. Uses Gmail if configured, else Resend.
 
     Most US carriers provide a free email-to-SMS gateway, e.g.:
       AT&T:    number@txt.att.net
@@ -74,6 +105,12 @@ def send_free_sms(message: str) -> bool:
     if not NOTIFY_PHONE_CARRIER_EMAIL:
         return False
     subject = message[:40]
+    # Gmail is preferred — works for any carrier gateway without domain restrictions
+    if GMAIL_USER and GMAIL_APP_PASSWORD:
+        return _send_via_gmail(NOTIFY_PHONE_CARRIER_EMAIL, subject, message)
+    # Resend fallback (requires verified domain for external recipients)
+    if not RESEND_API_KEY:
+        return False
     payload = {
         "from":    NOTIFY_FROM,
         "to":      [NOTIFY_PHONE_CARRIER_EMAIL],
