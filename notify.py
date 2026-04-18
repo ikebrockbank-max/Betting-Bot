@@ -111,182 +111,206 @@ def alert(subject: str, html: str, plain: str, sms_msg: str):
 
 # ── Email formatters ──────────────────────────────────────────────────────────
 
-def format_bugs_email(bugs: list) -> tuple[str, str, str]:
-    """Returns (subject, html, plain) for a list of bug dicts."""
-    count  = len(bugs)
-    subject = f"🚨 {count} PrizePicks Bug{'s' if count > 1 else ''} Found!"
+_EMAIL_WRAP = """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#f4f6f8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f8;padding:32px 0;">
+  <tr><td align="center">
+    <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+      <tr><td style="background:{header_color};padding:24px 32px;">
+        <h1 style="margin:0;color:#fff;font-size:22px;font-weight:700;">{header_icon} {header_title}</h1>
+        <p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:14px;">{header_sub}</p>
+      </td></tr>
+      <tr><td style="padding:28px 32px;">
+        {body}
+      </td></tr>
+      <tr><td style="background:#f4f6f8;padding:16px 32px;border-top:1px solid #e8ecf0;">
+        <p style="margin:0;color:#9aa5b4;font-size:12px;">PP Bug Scanner &bull; Runs every 15 min &bull; Reply to unsubscribe</p>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>"""
 
-    rows = ""
+_CARD = """\
+<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:12px;border:1px solid #e8ecf0;border-radius:8px;overflow:hidden;">
+  <tr style="background:{accent};">
+    <td style="padding:10px 16px;">
+      <span style="color:#fff;font-weight:700;font-size:15px;">{player}</span>
+      <span style="color:rgba(255,255,255,0.8);font-size:13px;margin-left:8px;">{league}</span>
+    </td>
+  </tr>
+  <tr><td style="padding:14px 16px;">
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        {cells}
+      </tr>
+    </table>
+  </td></tr>
+</table>"""
+
+_CELL = '<td style="text-align:center;padding:0 12px 0 0;"><div style="color:#9aa5b4;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">{label}</div><div style="font-size:16px;font-weight:700;color:{color};">{value}</div></td>'
+
+
+def _cell(label, value, color="#1a202c"):
+    return _CELL.format(label=label, value=value, color=color)
+
+
+def format_bugs_email(bugs: list) -> tuple[str, str, str]:
+    count = len(bugs)
+    subject = f"PrizePicks: {count} Bug{'s' if count > 1 else ''} Found"
+
+    cards = ""
     plain_lines = []
     for b in bugs:
-        gap_str   = f"gap={b['gap']}" if b.get("gap", 0) > 0 else "SAME LINE"
-        moved_str = (f" <em>(std moved {b['prev_std']}→{b['standard']})</em>"
-                     if b.get("prev_std") else "")
-        start     = b.get("start_time", "")[:16]
-        rows += (
-            f"<tr>"
-            f"<td><b>{b['player']}</b></td>"
-            f"<td>{b['stat']}</td>"
-            f"<td>{b['league']}</td>"
-            f"<td style='color:green'><b>demon {b['bug_line']}</b> vs std {b['standard']}</td>"
-            f"<td>{gap_str}{moved_str}</td>"
-            f"<td>{start}</td>"
-            f"</tr>"
+        gap = b.get("gap", 0)
+        gap_str = f"+{gap} easier" if gap > 0 else "same line"
+        moved = f"  (std moved {b['prev_std']} to {b['standard']})" if b.get("prev_std") else ""
+        start = b.get("start_time", "")[:16].replace("T", " ")
+        cards += _CARD.format(
+            accent="#e53e3e",
+            player=b["player"],
+            league=b["league"],
+            cells=(
+                _cell("Stat", b["stat"]) +
+                _cell("Demon Line", b["bug_line"], "#38a169") +
+                _cell("Standard", b["standard"], "#718096") +
+                _cell("Edge", gap_str, "#38a169") +
+                _cell("Game Time", start, "#4a5568")
+            ),
         )
         plain_lines.append(
-            f"★ {b['player']} {b['stat']} [{b['league']}]: "
-            f"demon={b['bug_line']} std={b['standard']} ({gap_str}) {start}"
+            f"  {b['player']} {b['stat']} [{b['league']}]: "
+            f"demon={b['bug_line']} std={b['standard']} ({gap_str}){moved} {start}"
         )
 
-    html = f"""
-<h2 style="color:#e74c3c">🚨 {count} Exploitable PrizePicks Bug{'s' if count > 1 else ''}</h2>
-<table border="1" cellpadding="6" style="border-collapse:collapse;font-family:monospace">
-  <tr style="background:#f0f0f0">
-    <th>Player</th><th>Stat</th><th>League</th>
-    <th>Line Bug</th><th>Gap</th><th>Game Start</th>
-  </tr>
-  {rows}
-</table>
-<p style="color:#888;font-size:12px">Bet demon OVER {bugs[0]['bug_line'] if bugs else '?'} —
-{'same difficulty as standard but higher payout' if not bugs[0].get('gap') else f"easier than standard by {bugs[0]['gap']} units"}</p>
-"""
-    plain = subject + "\n\n" + "\n".join(plain_lines)
+    tip = (f"Bet DEMON OVER {bugs[0]['bug_line']} — "
+           f"{'same difficulty as standard pick but higher payout' if not bugs[0].get('gap') else f\"{bugs[0]['gap']} units easier than standard at demon payout\"}") if bugs else ""
+
+    body = cards + f'<p style="margin:16px 0 0;padding:12px 16px;background:#f0fff4;border-left:4px solid #38a169;border-radius:4px;color:#276749;font-size:13px;">{tip}</p>'
+
+    html = _EMAIL_WRAP.format(
+        header_color="#e53e3e",
+        header_icon="",
+        header_title=f"{count} Exploitable Bug{'s' if count > 1 else ''} on PrizePicks",
+        header_sub="A demon line is easier than the standard line — guaranteed edge",
+        body=body,
+    )
+    plain = subject + "\n\n" + "\n".join(plain_lines) + f"\n\n{tip}"
     return subject, html, plain
 
 
 def format_flash_email(sales: list) -> tuple[str, str, str]:
-    """Returns (subject, html, plain) for flash sale dicts."""
-    count   = len(sales)
-    subject = f"⚡ {count} PrizePicks Flash Sale{'s' if count > 1 else ''}!"
+    count = len(sales)
+    subject = f"PrizePicks: {count} Flash Sale{'s' if count > 1 else ''}"
 
-    rows = ""
+    cards = ""
     plain_lines = []
     for s in sales:
-        start = s.get("start_time", "")[:16]
-        rows += (
-            f"<tr>"
-            f"<td><b>{s['player']}</b></td>"
-            f"<td>{s['stat']}</td>"
-            f"<td>{s['league']}</td>"
-            f"<td><s>{s['normal_line']}</s> → <b style='color:green'>{s['sale_line']}</b></td>"
-            f"<td style='color:green'>−{s['discount']}</td>"
-            f"<td>{start}</td>"
-            f"</tr>"
+        start = s.get("start_time", "")[:16].replace("T", " ")
+        cards += _CARD.format(
+            accent="#d97706",
+            player=s["player"],
+            league=s["league"],
+            cells=(
+                _cell("Stat", s["stat"]) +
+                _cell("Normal Line", s["normal_line"], "#718096") +
+                _cell("Sale Line", s["sale_line"], "#38a169") +
+                _cell("Discount", f"-{s['discount']}", "#38a169") +
+                _cell("Game Time", start, "#4a5568")
+            ),
         )
         plain_lines.append(
-            f"⚡ {s['player']} {s['stat']}: {s['normal_line']} → {s['sale_line']} (−{s['discount']}) | {start}"
+            f"  {s['player']} {s['stat']}: {s['normal_line']} -> {s['sale_line']} (-{s['discount']}) | {start}"
         )
 
-    html = f"""
-<h2 style="color:#f39c12">⚡ {count} Flash Sale{'s' if count > 1 else ''} — Limited Time!</h2>
-<table border="1" cellpadding="6" style="border-collapse:collapse;font-family:monospace">
-  <tr style="background:#f0f0f0">
-    <th>Player</th><th>Stat</th><th>League</th>
-    <th>Line (Sale)</th><th>Discount</th><th>Game Start</th>
-  </tr>
-  {rows}
-</table>
-<p style="color:#e67e22"><b>Act fast — flash sales typically expire in 15–60 minutes.</b></p>
-"""
+    html = _EMAIL_WRAP.format(
+        header_color="#d97706",
+        header_icon="",
+        header_title=f"{count} Flash Sale{'s' if count > 1 else ''} — Act Fast",
+        header_sub="Flash sales typically expire in 15–60 minutes",
+        body=cards,
+    )
     plain = subject + "\n\n" + "\n".join(plain_lines)
     return subject, html, plain
 
 
 def format_promo_email(promos: list) -> tuple[str, str, str]:
-    """Returns (subject, html, plain) for promo line dicts."""
-    count   = len(promos)
-    subject = f"🎯 {count} PrizePicks Promo Line{'s' if count > 1 else ''}"
+    count = len(promos)
+    subject = f"PrizePicks: {count} Promo Line{'s' if count > 1 else ''}"
 
-    rows = ""
+    cards = ""
     plain_lines = []
     for p in promos:
-        start = p.get("start_time", "")[:16]
-        rows += (
-            f"<tr>"
-            f"<td><b>{p['player']}</b></td>"
-            f"<td>{p['stat']}</td>"
-            f"<td>{p['league']}</td>"
-            f"<td>{p['odds_type']}</td>"
-            f"<td><b>{p['line']}</b></td>"
-            f"<td>{start}</td>"
-            f"</tr>"
+        start = p.get("start_time", "")[:16].replace("T", " ")
+        cards += _CARD.format(
+            accent="#6b46c1",
+            player=p["player"],
+            league=p["league"],
+            cells=(
+                _cell("Stat", p["stat"]) +
+                _cell("Type", p["odds_type"], "#6b46c1") +
+                _cell("Line", p["line"], "#1a202c") +
+                _cell("Game Time", start, "#4a5568")
+            ),
         )
         plain_lines.append(
-            f"🎯 {p['player']} {p['stat']} [{p['league']}]: {p['odds_type']} {p['line']} (PROMO) | {start}"
+            f"  {p['player']} {p['stat']} [{p['league']}]: {p['odds_type']} {p['line']} (PROMO) | {start}"
         )
 
-    html = f"""
-<h2 style="color:#8e44ad">🎯 {count} Boosted Promo Line{'s' if count > 1 else ''}</h2>
-<table border="1" cellpadding="6" style="border-collapse:collapse;font-family:monospace">
-  <tr style="background:#f0f0f0">
-    <th>Player</th><th>Stat</th><th>League</th>
-    <th>Type</th><th>Line</th><th>Game Start</th>
-  </tr>
-  {rows}
-</table>
-<p>These lines have boosted multipliers. Cross-check vs sportsbook consensus for best picks.</p>
-"""
+    html = _EMAIL_WRAP.format(
+        header_color="#6b46c1",
+        header_icon="",
+        header_title=f"{count} Boosted Promo Line{'s' if count > 1 else ''}",
+        header_sub="Cross-check vs sportsbook consensus for best picks",
+        body=cards,
+    )
     plain = subject + "\n\n" + "\n".join(plain_lines)
     return subject, html, plain
 
 
 def format_ud_bugs_email(bugs: list) -> tuple[str, str, str]:
-    """Returns (subject, html, plain) for a list of Underdog bug dicts."""
     count = len(bugs)
-    subject = f"Underdog {count} Bug{'s' if count > 1 else ''} Found!"
+    subject = f"Underdog: {count} Mispriced Line{'s' if count > 1 else ''} Found"
 
-    rows = ""
+    cards = ""
     plain_lines = []
     for b in bugs:
         bug_type = b.get("bug_type", "")
         if bug_type in ("easy_alternate", "mispriced_alternate"):
-            detail = (
-                f"<td style='color:green'><b>alt {b['alt_value']}</b> vs bal {b['balanced']}</td>"
-                f"<td>{b['alt_mult']:.3f}x</td>"
-                f"<td style='color:green'>+{b['gap']}</td>"
+            cells = (
+                _cell("Stat", b["stat"]) +
+                _cell("Alt Line", b["alt_value"], "#38a169") +
+                _cell("Balanced", b["balanced"], "#718096") +
+                _cell("Multiplier", f"{b['alt_mult']:.2f}x", "#38a169") +
+                _cell("Gap", f"+{b['gap']}", "#38a169")
             )
-            plain_detail = (
-                f"alt={b['alt_value']} bal={b['balanced']} "
-                f"mult={b['alt_mult']:.3f} gap={b['gap']}"
-            )
-        else:  # expiring_line
-            exp = str(b.get("expires_at", ""))[:19]
-            detail = (
-                f"<td><b>bal {b['balanced']}</b></td>"
-                f"<td>—</td>"
-                f"<td style='color:orange'>expires {exp}</td>"
+            plain_detail = f"alt={b['alt_value']} bal={b['balanced']} mult={b['alt_mult']:.3f} gap={b['gap']}"
+        else:
+            exp = str(b.get("expires_at", ""))[:16].replace("T", " ")
+            cells = (
+                _cell("Stat", b["stat"]) +
+                _cell("Balanced", b["balanced"]) +
+                _cell("Expires", exp, "#d97706")
             )
             plain_detail = f"bal={b['balanced']} expires={exp}"
 
-        rows += (
-            f"<tr>"
-            f"<td><b>{b['player']}</b></td>"
-            f"<td>{b['stat']}</td>"
-            f"<td>{b['sport']}</td>"
-            f"<td>{bug_type}</td>"
-            f"{detail}"
-            f"</tr>"
+        cards += _CARD.format(
+            accent="#dd6b20",
+            player=b["player"],
+            league=b.get("sport", ""),
+            cells=cells,
         )
-        exp_str = str(b.get("expires_at", ""))[:16]
-        plain_lines.append(
-            f"[{b['sport']}] {b['player']} {b['stat']}: "
-            f"{plain_detail}"
-            + (f" | exp={exp_str}" if exp_str else "")
-        )
+        plain_lines.append(f"  [{b.get('sport','')}] {b['player']} {b['stat']}: {plain_detail}")
 
-    html = f"""
-<h2 style="color:#e67e22">Underdog {count} Exploitable Bug{'s' if count > 1 else ''}</h2>
-<table border="1" cellpadding="6" style="border-collapse:collapse;font-family:monospace">
-  <tr style="background:#f0f0f0">
-    <th>Player</th><th>Stat</th><th>Sport</th>
-    <th>Bug Type</th><th>Line</th><th>Mult</th><th>Gap / Expiry</th>
-  </tr>
-  {rows}
-</table>
-<p style="color:#888;font-size:12px">
-  easy_alternate: bet HIGHER on the alternate — easier than balanced at boosted payout.<br>
-  expiring_line: balanced line expires soon — check for flash-sale edge.
-</p>
-"""
+    html = _EMAIL_WRAP.format(
+        header_color="#dd6b20",
+        header_icon="",
+        header_title=f"{count} Mispriced Underdog Line{'s' if count > 1 else ''}",
+        header_sub="Easier than the balanced line at the same or better payout",
+        body=cards,
+    )
     plain = subject + "\n\n" + "\n".join(plain_lines)
     return subject, html, plain

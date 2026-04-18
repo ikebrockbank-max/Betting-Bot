@@ -3,11 +3,11 @@ from notify import send_push, send_email, format_bugs_email
 
 mock_bug = {
     "player": "DeAnthony Melton",
-    "stat": "Points",
+    "stat": "Rebounds+Assists",
     "league": "NBA",
     "game_id": "test",
-    "bug_line": 13.5,
-    "standard": 15.5,
+    "bug_line": 7.5,
+    "standard": 9.5,
     "bug_type": "demon_easy",
     "gap": 2.0,
     "start_time": "2026-04-18T21:00:00",
