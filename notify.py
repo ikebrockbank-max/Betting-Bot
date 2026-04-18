@@ -186,8 +186,12 @@ def format_bugs_email(bugs: list) -> tuple[str, str, str]:
             f"demon={b['bug_line']} std={b['standard']} ({gap_str}){moved} {start}"
         )
 
-    tip = (f"Bet DEMON OVER {bugs[0]['bug_line']} — "
-           f"{'same difficulty as standard pick but higher payout' if not bugs[0].get('gap') else f\"{bugs[0]['gap']} units easier than standard at demon payout\"}") if bugs else ""
+    if bugs:
+        b0 = bugs[0]
+        edge_desc = f"{b0['gap']} units easier than standard at demon payout" if b0.get("gap") else "same difficulty as standard pick but higher payout"
+        tip = f"Bet DEMON OVER {b0['bug_line']} — {edge_desc}"
+    else:
+        tip = ""
 
     body = cards + f'<p style="margin:16px 0 0;padding:12px 16px;background:#f0fff4;border-left:4px solid #38a169;border-radius:4px;color:#276749;font-size:13px;">{tip}</p>'
 
