@@ -25,6 +25,7 @@ from scanner_bugs import (
     find_line_movement_bugs,
     find_flash_sales,
     find_promos,
+    find_adjusted_standard_lines,
     HOURS_AHEAD_DEFAULT,
 )
 from scanner_consensus import find_consensus_edges, find_correlated_legs, print_consensus_edges
@@ -110,6 +111,7 @@ def run():
     move_bugs      = find_line_movement_bugs(groups)
     flash_sales    = find_flash_sales(projections, players, HOURS_AHEAD)
     promos         = find_promos(projections, players, HOURS_AHEAD)
+    adj_standards  = find_adjusted_standard_lines(groups)
     consensus_edges = find_consensus_edges(projections, players)
     correlated     = find_correlated_legs(consensus_edges)
 
@@ -141,6 +143,14 @@ def run():
 
     # Correlated parlays for new consensus edges only
     new_correlated = find_correlated_legs(new_consensus)
+
+    # Log adjusted-odds standard lines — direction unknown, user must verify in app
+    boosted = [a for a in adj_standards if a["likely_boosted"]]
+    if boosted:
+        _log(f"💰 {len(boosted)} standard line(s) with likely-boosted multiplier (no demon above):")
+        for a in boosted[:5]:
+            _log(f"  💰 {a['league']} | {a['player']} {a['stat']} | "
+                 f"standard={a['line']} goblins={a['goblin_ladder']} | VERIFY MULTIPLIER IN APP")
 
     # Log goblin traps for awareness (no alert — these are "avoid" warnings, not bet signals)
     if move_goblin_traps:

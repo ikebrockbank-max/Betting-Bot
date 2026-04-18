@@ -164,6 +164,7 @@ def _group_lines(projections: list, players: dict, hours_ahead: int) -> tuple[di
 
     groups: dict = defaultdict(lambda: {
         "standard": None, "demon": [], "goblin": [],
+        "standard_adjusted": False,   # True if PP flagged the standard line with adjusted_odds
         "league_id": None, "start_time": "",
     })
     game_info: dict = {}
@@ -214,6 +215,9 @@ def _group_lines(projections: list, players: dict, hours_ahead: int) -> tuple[di
 
         if ot == "standard":
             entry["standard"] = line
+            # Track whether PP flagged this standard line with a non-baseline multiplier
+            if attrs.get("adjusted_odds") is True:
+                entry["standard_adjusted"] = True
         else:
             entry[ot].append(line)
 
@@ -309,6 +313,63 @@ def _find_bugs(groups: dict) -> list[dict]:
                                   "description": f"Goblin {g} > Standard {s} (gap={gap}) — harder, avoid!"})
 
     return bugs
+
+
+# ── Adjusted-odds detector ───────────────────────────────────────────────────
+# PP standard lines normally have adjusted_odds=False (baseline multiplier).
+# When a standard line has adjusted_odds=True, PP has manually tweaked its
+# multiplier — could be UP (exploit: normal-looking pick, better-than-standard
+# payout) or DOWN (trap: easy pick, penalized payout). User must verify in app.
+# Most useful when the standard line is ALSO easy (no demon lines above it),
+# suggesting PP bumped a lazy line's multiplier upward.
+
+def find_adjusted_standard_lines(groups: dict) -> list[dict]:
+    """
+    Find standard lines where PP has flagged adjusted_odds=True.
+    These have a non-baseline multiplier — could be higher OR lower than standard.
+    Returns a list for manual review; direction must be confirmed in the PP app.
+    """
+    results = []
+    for (player, stat, game_id, _lid), entry in groups.items():
+        if not entry.get("standard_adjusted"):
+            continue
+        s = entry.get("standard")
+        if s is None:
+            continue
+        lid = entry.get("league_id")
+        league = LEAGUE_NAMES.get(lid, f"league_{lid}")
+
+        # Context: is this an easy pick (no demon line above standard, lots of goblins)?
+        demon_lines = sorted(entry.get("demon", []))
+        goblin_lines = sorted(entry.get("goblin", []))
+        demons_above = [d for d in demon_lines if d > s]
+        goblins_below = [g for g in goblin_lines if g < s]
+
+        # Mark as "likely boosted" if no demons above standard exist
+        # (PP may have boosted the standard to act as the demon tier)
+        likely_boosted = len(demons_above) == 0 and len(goblins_below) > 0
+
+        results.append({
+            "player":         player,
+            "stat":           stat,
+            "league":         league,
+            "league_id":      lid,
+            "line":           s,
+            "game_id":        game_id,
+            "start_time":     entry.get("start_time", ""),
+            "demon_ladder":   demon_lines,
+            "goblin_ladder":  goblin_lines,
+            "likely_boosted": likely_boosted,
+            "note": (
+                "No demons above — standard may be acting as demon tier (likely UP)"
+                if likely_boosted else
+                "Has demon lines above — standard multiplier adjusted, direction unknown"
+            ),
+        })
+
+    # Sort: likely-boosted first, then by league+player
+    results.sort(key=lambda x: (not x["likely_boosted"], x["league"], x["player"]))
+    return results
 
 
 # ── Flash sale detector ───────────────────────────────────────────────────────
@@ -589,13 +650,15 @@ def scan_bugs(sport: str = "nba", show_all_lines: bool = False, hours_ahead: int
     actionable = [b for b in bugs if b["bug_type"] in ("demon_easy", "demon_eq_standard")]
     avoid = [b for b in bugs if b["bug_type"] == "goblin_hard"]
 
-    move_bugs   = find_line_movement_bugs(groups)
-    flash_sales = find_flash_sales(projections, players, hours_ahead)
-    promos      = find_promos(projections, players, hours_ahead)
+    move_bugs     = find_line_movement_bugs(groups)
+    flash_sales   = find_flash_sales(projections, players, hours_ahead)
+    promos        = find_promos(projections, players, hours_ahead)
+    adj_standards = find_adjusted_standard_lines(groups)
 
     _print_bugs(actionable + move_bugs, avoid, league_name, game_info)
     _print_flash_sales(flash_sales)
     _print_promos(promos)
+    _print_adjusted_standards(adj_standards)
     if show_all_lines:
         _print_all_lines(groups, league_name, actionable + move_bugs)
 
@@ -631,13 +694,15 @@ def scan_all_leagues(show_all_lines: bool = False, hours_ahead: int = HOURS_AHEA
     avoid = [b for b in bugs if b["bug_type"] == "goblin_hard"]
 
     # New detectors
-    move_bugs  = find_line_movement_bugs(groups)
-    flash_sales = find_flash_sales(projections, players, hours_ahead)
-    promos      = find_promos(projections, players, hours_ahead)
+    move_bugs     = find_line_movement_bugs(groups)
+    flash_sales   = find_flash_sales(projections, players, hours_ahead)
+    promos        = find_promos(projections, players, hours_ahead)
+    adj_standards = find_adjusted_standard_lines(groups)
 
     _print_bugs(actionable + move_bugs, avoid, "ALL LEAGUES", game_info)
     _print_flash_sales(flash_sales)
     _print_promos(promos)
+    _print_adjusted_standards(adj_standards)
     if show_all_lines:
         _print_all_lines(groups, "ALL LEAGUES", actionable + move_bugs)
 
@@ -702,6 +767,26 @@ def _print_promos(promos: list):
             start = ln.get("start_time", "")[:16]
             print(f"    [{ln['league']}] {player} {ln['stat']}: "
                   f"{ln['odds_type']} line={ln['line']} (PROMO — boosted payout) | {start}")
+
+
+def _print_adjusted_standards(lines: list):
+    if not lines:
+        return
+    boosted = [l for l in lines if l["likely_boosted"]]
+    unknown = [l for l in lines if not l["likely_boosted"]]
+    if boosted:
+        print(f"\n  💰 LIKELY BOOSTED STANDARD LINES ({len(boosted)}) — no demon above, multiplier adjusted UP:")
+        for l in boosted:
+            start = l.get("start_time", "")[:16]
+            print(f"    [{l['league']}] {l['player']} {l['stat']}: standard={l['line']} "
+                  f"goblins={l['goblin_ladder']} | {start}")
+            print(f"      → VERIFY IN APP: standard pick with adjusted (likely higher) multiplier")
+    if unknown:
+        print(f"\n  ⚙  ADJUSTED STANDARD LINES ({len(unknown)}) — multiplier modified, direction unknown:")
+        for l in unknown[:10]:  # cap to avoid spam
+            start = l.get("start_time", "")[:16]
+            print(f"    [{l['league']}] {l['player']} {l['stat']}: standard={l['line']} "
+                  f"demons={l['demon_ladder']} | {start}")
 
 
 def _print_all_lines(groups: dict, label: str, actionable: list):
