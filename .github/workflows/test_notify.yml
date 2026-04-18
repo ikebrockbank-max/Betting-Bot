@@ -13,10 +13,10 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Send test text + email
+      - name: Send test push + email
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-          NOTIFY_PHONE_CARRIER_EMAIL: ${{ secrets.NOTIFY_PHONE_CARRIER_EMAIL }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python3 test_notify.py

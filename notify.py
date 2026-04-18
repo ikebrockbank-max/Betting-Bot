@@ -1,16 +1,12 @@
 """
-notify.py — unified notification sender (email + SMS).
+notify.py — unified notification sender (email + push notification).
 
-Reads credentials from environment variables (set in .env or Railway dashboard):
+Reads credentials from environment variables (set in .env or GitHub secrets):
 
-  RESEND_API_KEY   — from resend.com (free: 3,000 emails/month)
-  NOTIFY_EMAIL     — your email address to receive alerts
-  NOTIFY_FROM      — sender address (e.g. alerts@yourdomain.com or onboarding@resend.dev for testing)
-
-  TWILIO_ACCOUNT_SID  — from twilio.com console (optional)
-  TWILIO_AUTH_TOKEN   — from twilio.com console (optional)
-  TWILIO_FROM_NUMBER  — your Twilio phone number, e.g. +15551234567 (optional)
-  NOTIFY_PHONE        — your cell number to receive SMS, e.g. +15559876543 (optional)
+  GMAIL_USER         — your Gmail address
+  GMAIL_APP_PASSWORD — Gmail app password (not your regular password)
+  NOTIFY_EMAIL       — destination email address for alerts
+  NTFY_TOPIC         — ntfy.sh topic name for push notifications (free, no account needed)
 """
 
 import os
@@ -22,20 +18,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-RESEND_API_KEY   = os.getenv("RESEND_API_KEY", "")
 NOTIFY_EMAIL     = os.getenv("NOTIFY_EMAIL", "")
-NOTIFY_FROM      = os.getenv("NOTIFY_FROM", "onboarding@resend.dev")
-
-TWILIO_SID       = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_TOKEN     = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_FROM      = os.getenv("TWILIO_FROM_NUMBER", "")
-NOTIFY_PHONE     = os.getenv("NOTIFY_PHONE", "")
-
-NOTIFY_PHONE_CARRIER_EMAIL = os.getenv("NOTIFY_PHONE_CARRIER_EMAIL", "")
-
-# Gmail SMTP (free, works for any destination including carrier gateways)
 GMAIL_USER         = os.getenv("GMAIL_USER", "")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
+NTFY_TOPIC         = os.getenv("NTFY_TOPIC", "")
 
 
 def _send_via_gmail(to: str, subject: str, body: str) -> bool:
@@ -90,70 +76,35 @@ def send_email(subject: str, html_body: str, plain_body: str = "") -> bool:
         return False
 
 
-def send_free_sms(message: str) -> bool:
-    """Send a free SMS via carrier email gateway. Uses Gmail if configured, else Resend.
-
-    Most US carriers provide a free email-to-SMS gateway, e.g.:
-      AT&T:    number@txt.att.net
-      Verizon: number@vtext.com
-      T-Mobile: number@tmomail.net
-
-    Set NOTIFY_PHONE_CARRIER_EMAIL to your gateway address.
-    The email subject becomes the SMS header on most carriers.
-    Skips silently if NOTIFY_PHONE_CARRIER_EMAIL is not set.
+def send_push(message: str, title: str = "PP Bot Alert") -> bool:
+    """Send a push notification via ntfy.sh (free, no account needed).
+    Install the ntfy app and subscribe to your NTFY_TOPIC to receive alerts.
     """
-    if not NOTIFY_PHONE_CARRIER_EMAIL:
+    if not NTFY_TOPIC:
         return False
-    subject = message.replace("\n", " ")[:40]
-    # Gmail is preferred — works for any carrier gateway without domain restrictions
-    if GMAIL_USER and GMAIL_APP_PASSWORD:
-        return _send_via_gmail(NOTIFY_PHONE_CARRIER_EMAIL, subject, message)
-    # Resend fallback (requires verified domain for external recipients)
-    if not RESEND_API_KEY:
-        return False
-    payload = {
-        "from":    NOTIFY_FROM,
-        "to":      [NOTIFY_PHONE_CARRIER_EMAIL],
-        "subject": subject,
-        "text":    message,
-    }
     try:
         resp = requests.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
-            json=payload,
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=message.encode("utf-8"),
+            headers={"Title": title, "Priority": "high", "Tags": "money_with_wings"},
             timeout=10,
         )
         resp.raise_for_status()
         return True
     except Exception as e:
-        print(f"[notify] Free SMS (carrier email) failed: {e}")
+        print(f"[notify] Push notification failed: {e}")
         return False
 
 
 def send_sms(message: str) -> bool:
-    """Send an SMS via Twilio, falling back to free carrier-email SMS if Twilio is not configured."""
-    if all([TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM, NOTIFY_PHONE]):
-        try:
-            resp = requests.post(
-                f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json",
-                auth=(TWILIO_SID, TWILIO_TOKEN),
-                data={"From": TWILIO_FROM, "To": NOTIFY_PHONE, "Body": message},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            return True
-        except Exception as e:
-            print(f"[notify] SMS failed: {e}")
-            return False
-    else:
-        return send_free_sms(message)
+    """Send a push notification (ntfy.sh). Named send_sms for backwards compatibility."""
+    return send_push(message)
 
 
 def alert(subject: str, html: str, plain: str, sms_msg: str):
-    """Send both email and SMS. Silently skips whichever isn't configured."""
+    """Send email + push notification. Silently skips whichever isn't configured."""
     send_email(subject, html, plain)
-    send_sms(sms_msg)
+    send_push(sms_msg, title=subject[:50])
 
 
 # ── Email formatters ──────────────────────────────────────────────────────────
