@@ -23,8 +23,11 @@ from statistics import median
 from pathlib import Path
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
-MIN_ABS_DIFF  = 2.0   # minimum absolute gap between platform line and consensus
-MIN_PCT_DIFF  = 0.20  # minimum percentage gap (20%)
+# User wants "much different" — only fire on genuinely significant discrepancies.
+# Example that fires: PP=24.5 pts, consensus=19.5 pts → diff=5.0 (25%) ✓
+# Example that doesn't: PP=22.5, consensus=20.5 → diff=2.0 (9.7%) ✗
+MIN_ABS_DIFF  = 3.0   # minimum absolute gap (units)
+MIN_PCT_DIFF  = 0.20  # minimum percentage gap (20%) — both must be met
 MIN_BOOKS     = 2     # need at least this many books to trust consensus
 
 # ── PP stat name → Action Network / Odds API market key ───────────────────────
@@ -193,7 +196,10 @@ def find_consensus_edges(
             lid = 0
         league  = attrs.get("league", "") or str(lid)
 
-        # Only standard lines for consensus comparison
+        # Only compare standard lines — demon/goblin are intentionally shifted
+        if attrs.get("odds_type") != "standard":
+            continue
+
         line_score = attrs.get("line_score")
         if line_score is None:
             continue
