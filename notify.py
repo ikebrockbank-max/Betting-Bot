@@ -104,7 +104,7 @@ def send_free_sms(message: str) -> bool:
     """
     if not NOTIFY_PHONE_CARRIER_EMAIL:
         return False
-    subject = message[:40]
+    subject = message.replace("\n", " ")[:40]
     # Gmail is preferred — works for any carrier gateway without domain restrictions
     if GMAIL_USER and GMAIL_APP_PASSWORD:
         return _send_via_gmail(NOTIFY_PHONE_CARRIER_EMAIL, subject, message)
