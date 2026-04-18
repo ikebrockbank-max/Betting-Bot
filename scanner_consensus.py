@@ -231,6 +231,11 @@ def find_consensus_edges(
         edge = _compare(pp_line, consensus_line, pname, stat, league,
                         source="action_network", platform="pp")
         if edge:
+            # Flag if PP has also adjusted the multiplier on this standard line
+            # (adjusted_odds=True means PP's own model flagged it as asymmetric).
+            # When this agrees with the consensus direction → double-confirmed edge.
+            if attrs.get("adjusted_odds") is True:
+                edge["multiplier_confirmed"] = True
             edges.append(edge)
 
     edges.sort(key=lambda e: e["abs_diff"], reverse=True)
@@ -325,15 +330,27 @@ def print_consensus_edges(edges: list[dict], correlated: list[dict], label: str 
     print(f"  Scan time: {ts}")
 
     if edges:
-        print(f"\n  INDIVIDUAL EDGES ({len(edges)}):")
-        for e in edges:
-            arrow = "BET OVER" if e["direction"] == "over" else "BET UNDER"
-            print(
-                f"  [{e['league']}] {e['player']} {e['stat']}: "
-                f"{e['platform'].upper()} line={e['platform_line']} "
-                f"consensus={e['consensus']} "
-                f"diff={e['diff']:+.1f} ({e['pct_diff']}%) → {arrow}"
-            )
+        confirmed = [e for e in edges if e.get("multiplier_confirmed")]
+        regular   = [e for e in edges if not e.get("multiplier_confirmed")]
+        if confirmed:
+            print(f"\n  ★ DOUBLE-CONFIRMED EDGES ({len(confirmed)}) — consensus gap + PP's own multiplier agrees:")
+            for e in confirmed:
+                arrow = "BET MORE/OVER" if e["direction"] == "over" else "BET LESS/UNDER"
+                print(
+                    f"  ★ [{e['league']}] {e['player']} {e['stat']}: "
+                    f"line={e['platform_line']} consensus={e['consensus']} "
+                    f"diff={e['diff']:+.1f} ({e['pct_diff']}%) → {arrow} [MULT CONFIRMED]"
+                )
+        if regular:
+            print(f"\n  INDIVIDUAL EDGES ({len(regular)}):")
+            for e in regular:
+                arrow = "BET MORE/OVER" if e["direction"] == "over" else "BET LESS/UNDER"
+                print(
+                    f"  [{e['league']}] {e['player']} {e['stat']}: "
+                    f"{e['platform'].upper()} line={e['platform_line']} "
+                    f"consensus={e['consensus']} "
+                    f"diff={e['diff']:+.1f} ({e['pct_diff']}%) → {arrow}"
+                )
     else:
         print("\n  No consensus edges found.")
 

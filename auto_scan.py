@@ -214,7 +214,8 @@ def run():
     if new_consensus:
         _log(f"📊 {len(new_consensus)} NEW CONSENSUS EDGE(S):")
         for e in new_consensus:
-            _log(f"  📊 {e['league']} | {e['player']} {e['stat']} | "
+            confirmed_tag = " ★MULT" if e.get("multiplier_confirmed") else ""
+        _log(f"  📊{confirmed_tag} {e['league']} | {e['player']} {e['stat']} | "
                  f"PP={e['platform_line']} consensus={e['consensus']} "
                  f"({e['diff']:+.1f}, {e['pct_diff']}% off) → BET {e['direction'].upper()}")
 

@@ -307,14 +307,17 @@ def format_consensus_email(edges: list[dict], correlated: list[dict]) -> tuple[s
         )
         plain_lines.append(f"  PARLAY {c['direction'].upper()}: {c['player']} — {leg_text} (avg {c['avg_pct']}% off consensus)")
 
-    # Individual edges
-    for e in edges:
-        arrow = "BET OVER" if e["direction"] == "over" else "BET UNDER"
+    # Individual edges — double-confirmed first
+    for e in sorted(edges, key=lambda x: (not x.get("multiplier_confirmed", False), -x["abs_diff"])):
+        arrow = "BET MORE/OVER" if e["direction"] == "over" else "BET LESS/UNDER"
         color = "#38a169" if e["direction"] == "over" else "#e53e3e"
+        confirmed = e.get("multiplier_confirmed", False)
+        accent = "#1a56db" if confirmed else color
+        badge = " ★ MULT CONFIRMED" if confirmed else ""
         cards += _CARD.format(
-            accent=color,
+            accent=accent,
             player=e["player"],
-            league=e["league"],
+            league=e["league"] + badge,
             cells=(
                 _cell("Stat", e["stat"]) +
                 _cell(f"{e['platform'].upper()} Line", str(e["platform_line"]), color) +
@@ -324,9 +327,10 @@ def format_consensus_email(edges: list[dict], correlated: list[dict]) -> tuple[s
             ),
         )
         plain_lines.append(
-            f"  {e['player']} {e['stat']} [{e['league']}]: "
+            f"  {'★ ' if confirmed else ''}{e['player']} {e['stat']} [{e['league']}]: "
             f"line={e['platform_line']} consensus={e['consensus']} "
             f"diff={e['diff']:+.1f} ({e['pct_diff']}%) → {arrow}"
+            + (" [MULT CONFIRMED]" if confirmed else "")
         )
 
     html = _EMAIL_WRAP.format(
