@@ -275,6 +275,62 @@ def format_promo_email(promos: list) -> tuple[str, str, str]:
     return subject, html, plain
 
 
+def format_consensus_email(edges: list[dict], correlated: list[dict]) -> tuple[str, str, str]:
+    """Returns (subject, html, plain) for consensus edge alerts."""
+    count   = len(edges)
+    subject = f"Line Value: {count} PP Line{'s' if count != 1 else ''} Way Off Consensus"
+
+    cards = ""
+    plain_lines = []
+
+    # Correlated parlays first
+    for c in correlated:
+        leg_text = ", ".join(f"{l['stat']} ({l['direction'].upper()} {l['platform_line']})" for l in c["legs"])
+        cards += _CARD.format(
+            accent="#1a56db",
+            player=c["player"],
+            league=f"CORRELATED {c['direction'].upper()} PARLAY",
+            cells=(
+                _cell("Legs", str(len(c["legs"])), "#1a56db") +
+                _cell("Avg Edge", f"{c['avg_pct']}%", "#38a169") +
+                _cell("Stats", leg_text, "#4a5568")
+            ),
+        )
+        plain_lines.append(f"  PARLAY {c['direction'].upper()}: {c['player']} — {leg_text} (avg {c['avg_pct']}% off consensus)")
+
+    # Individual edges
+    for e in edges:
+        arrow = "BET OVER" if e["direction"] == "over" else "BET UNDER"
+        color = "#38a169" if e["direction"] == "over" else "#e53e3e"
+        cards += _CARD.format(
+            accent=color,
+            player=e["player"],
+            league=e["league"],
+            cells=(
+                _cell("Stat", e["stat"]) +
+                _cell(f"{e['platform'].upper()} Line", str(e["platform_line"]), color) +
+                _cell("Consensus", str(e["consensus"]), "#718096") +
+                _cell("Gap", f"{e['diff']:+.1f} ({e['pct_diff']}%)", color) +
+                _cell("Play", arrow, color)
+            ),
+        )
+        plain_lines.append(
+            f"  {e['player']} {e['stat']} [{e['league']}]: "
+            f"line={e['platform_line']} consensus={e['consensus']} "
+            f"diff={e['diff']:+.1f} ({e['pct_diff']}%) → {arrow}"
+        )
+
+    html = _EMAIL_WRAP.format(
+        header_color="#1a56db",
+        header_icon="",
+        header_title=f"{count} Line{'s' if count != 1 else ''} Significantly Off Sportsbook Consensus",
+        header_sub="Platform lines compared to DraftKings, FanDuel, BetMGM, Caesars and others",
+        body=cards,
+    )
+    plain = subject + "\n\n" + "\n".join(plain_lines)
+    return subject, html, plain
+
+
 def format_ud_bugs_email(bugs: list) -> tuple[str, str, str]:
     count = len(bugs)
     subject = f"Underdog: {count} Mispriced Line{'s' if count > 1 else ''} Found"

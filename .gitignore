@@ -25,3 +25,4 @@ logs/.nba_player_cache.json
 
 # DO commit: logs/.seen_*.json and logs/.line_snapshot.json
 # GitHub Actions uses them to track already-alerted bugs.
+# logs/.odds_cache/ is intentionally gitignored (large, regenerated each run)

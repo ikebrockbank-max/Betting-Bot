@@ -27,19 +27,22 @@ from scanner_bugs import (
     find_promos,
     HOURS_AHEAD_DEFAULT,
 )
+from scanner_consensus import find_consensus_edges, find_correlated_legs, print_consensus_edges
 from notify import (
     alert,
     format_bugs_email,
     format_flash_email,
     format_promo_email,
+    format_consensus_email,
     send_sms,
 )
 
-SEEN_BUGS_PATH  = Path("logs/.seen_bugs.json")
-SEEN_FLASH_PATH = Path("logs/.seen_flash.json")
-SEEN_PROMO_PATH = Path("logs/.seen_promos.json")
-SCAN_LOG_PATH   = Path("logs/auto_scan.log")
-HOURS_AHEAD     = 168  # 7 days ahead
+SEEN_BUGS_PATH      = Path("logs/.seen_bugs.json")
+SEEN_FLASH_PATH     = Path("logs/.seen_flash.json")
+SEEN_PROMO_PATH     = Path("logs/.seen_promos.json")
+SEEN_CONSENSUS_PATH = Path("logs/.seen_consensus.json")
+SCAN_LOG_PATH       = Path("logs/auto_scan.log")
+HOURS_AHEAD         = 168  # 7 days ahead
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -66,6 +69,9 @@ def _flash_key(s: dict) -> str:
 
 def _promo_key(p: dict) -> str:
     return f"{p['player']}|{p['stat']}|{p['game_id']}|{p['odds_type']}|{p['line']}"
+
+def _consensus_key(e: dict) -> str:
+    return f"{e['player']}|{e['stat']}|{e['direction']}|{e['platform_line']}|{e['consensus']}"
 
 
 def _mac_notify(title: str, message: str):
@@ -100,35 +106,44 @@ def run():
 
     groups, _ = _group_lines(projections, players, HOURS_AHEAD)
 
-    static_bugs = _find_bugs(groups)
-    move_bugs   = find_line_movement_bugs(groups)
-    flash_sales = find_flash_sales(projections, players, HOURS_AHEAD)
-    promos      = find_promos(projections, players, HOURS_AHEAD)
+    static_bugs    = _find_bugs(groups)
+    move_bugs      = find_line_movement_bugs(groups)
+    flash_sales    = find_flash_sales(projections, players, HOURS_AHEAD)
+    promos         = find_promos(projections, players, HOURS_AHEAD)
+    consensus_edges = find_consensus_edges(projections, players)
+    correlated     = find_correlated_legs(consensus_edges)
 
     actionable = [b for b in static_bugs if b["bug_type"] in ("demon_easy", "demon_eq_standard")]
     all_bugs   = actionable + move_bugs
 
-    seen_bugs  = _load_seen(SEEN_BUGS_PATH)
-    seen_flash = _load_seen(SEEN_FLASH_PATH)
-    seen_promo = _load_seen(SEEN_PROMO_PATH)
+    seen_bugs      = _load_seen(SEEN_BUGS_PATH)
+    seen_flash     = _load_seen(SEEN_FLASH_PATH)
+    seen_promo     = _load_seen(SEEN_PROMO_PATH)
+    seen_consensus = _load_seen(SEEN_CONSENSUS_PATH)
 
-    new_bugs   = [b for b in all_bugs   if _bug_key(b)   not in seen_bugs]
-    new_flash  = [s for s in flash_sales if _flash_key(s) not in seen_flash]
-    new_promos = [p for p in promos     if _promo_key(p) not in seen_promo]
+    new_bugs      = [b for b in all_bugs        if _bug_key(b)       not in seen_bugs]
+    new_flash     = [s for s in flash_sales      if _flash_key(s)     not in seen_flash]
+    new_promos    = [p for p in promos           if _promo_key(p)     not in seen_promo]
+    new_consensus = [e for e in consensus_edges  if _consensus_key(e) not in seen_consensus]
 
-    for b in new_bugs:   seen_bugs.add(_bug_key(b))
-    for s in new_flash:  seen_flash.add(_flash_key(s))
-    for p in new_promos: seen_promo.add(_promo_key(p))
+    for b in new_bugs:      seen_bugs.add(_bug_key(b))
+    for s in new_flash:     seen_flash.add(_flash_key(s))
+    for p in new_promos:    seen_promo.add(_promo_key(p))
+    for e in new_consensus: seen_consensus.add(_consensus_key(e))
 
-    _save_seen(SEEN_BUGS_PATH,  seen_bugs)
-    _save_seen(SEEN_FLASH_PATH, seen_flash)
-    _save_seen(SEEN_PROMO_PATH, seen_promo)
+    _save_seen(SEEN_BUGS_PATH,      seen_bugs)
+    _save_seen(SEEN_FLASH_PATH,     seen_flash)
+    _save_seen(SEEN_PROMO_PATH,     seen_promo)
+    _save_seen(SEEN_CONSENSUS_PATH, seen_consensus)
 
-    total_new = len(new_bugs) + len(new_flash) + len(new_promos)
+    # Correlated parlays for new consensus edges only
+    new_correlated = find_correlated_legs(new_consensus)
+
+    total_new = len(new_bugs) + len(new_flash) + len(new_promos) + len(new_consensus)
 
     if total_new == 0:
-        _log(f"Scan complete — {len(all_bugs)} known bug(s), "
-             f"{len(flash_sales)} flash sale(s), {len(promos)} promo(s) — nothing new.")
+        _log(f"Scan complete — {len(all_bugs)} bugs, {len(flash_sales)} flash, "
+             f"{len(promos)} promos, {len(consensus_edges)} consensus edges — nothing new.")
         return
 
     # ── New bugs ──────────────────────────────────────────────────────────────
@@ -172,6 +187,28 @@ def run():
         names = ", ".join(f"{p['player']} {p['stat']}" for p in new_promos[:2])
         sms   = f"🎯 PP Promo: {names}" + (f" +{len(new_promos)-2} more" if len(new_promos) > 2 else "")
         alert(subject, html, plain, sms)
+        _mac_notify(subject, sms)
+
+    # ── Consensus edges ───────────────────────────────────────────────────────
+    if new_consensus:
+        _log(f"📊 {len(new_consensus)} NEW CONSENSUS EDGE(S):")
+        for e in new_consensus:
+            _log(f"  📊 {e['league']} | {e['player']} {e['stat']} | "
+                 f"PP={e['platform_line']} consensus={e['consensus']} "
+                 f"({e['diff']:+.1f}, {e['pct_diff']}% off) → BET {e['direction'].upper()}")
+
+        if new_correlated:
+            _log(f"  ★ {len(new_correlated)} correlated parlay(s) found")
+
+        subject, html, plain = format_consensus_email(new_consensus, new_correlated)
+        top = new_consensus[0]
+        sms = (f"PP Line Edge: {top['player']} {top['stat']} "
+               f"line={top['platform_line']} vs consensus={top['consensus']} "
+               f"({top['pct_diff']}% off) BET {top['direction'].upper()}")
+        if len(new_consensus) > 1:
+            sms += f" +{len(new_consensus)-1} more"
+        alert(subject, html, plain, sms)
+        print_consensus_edges(new_consensus, new_correlated, "PP")
         _mac_notify(subject, sms)
 
 
