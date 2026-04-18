@@ -46,8 +46,17 @@ STAT_TO_MARKET = {
     "Rebounds+Assists":    "player_rebounds_assists",
 }
 
-# All PP league IDs covered by Action Network (NBA, MLB, NHL, NFL, WNBA)
-AN_SUPPORTED_LEAGUES = {7, 84, 192, 237, 250, 2, 8, 227, 231, 9, 3, 252}
+# Full-game PP league IDs only — sub-leagues (1H, 1Q, 1P, series) use
+# different time windows than sportsbook full-game lines so comparisons are invalid.
+AN_SUPPORTED_LEAGUES = {
+    7,    # NBA
+    2,    # MLB
+    8,    # NHL
+    9,    # NFL
+    3,    # WNBA
+    237,  # NBA Playoffs
+    252,  # WNBA (alternate ID)
+}
 
 
 # ── Name normalization ────────────────────────────────────────────────────────
