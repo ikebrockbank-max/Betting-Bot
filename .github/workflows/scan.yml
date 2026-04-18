@@ -46,4 +46,4 @@ jobs:
           git add logs/.seen_bugs.json logs/.seen_flash.json logs/.seen_promos.json \
                   logs/.line_snapshot.json logs/.seen_ud_bugs.json 2>/dev/null || true
           git diff --staged --quiet || git commit -m "chore: scanner state [skip ci]"
-          git push
+          git pull --rebase && git push || true
