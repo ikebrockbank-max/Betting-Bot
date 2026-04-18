@@ -40,10 +40,14 @@ jobs:
         run: python3 scanner_underdog.py --auto
 
       - name: Commit state cache
+        continue-on-error: true
         run: |
           git config user.name "scanner-bot"
           git config user.email "scanner-bot@noreply"
           git add logs/.seen_bugs.json logs/.seen_flash.json logs/.seen_promos.json \
                   logs/.line_snapshot.json logs/.seen_ud_bugs.json 2>/dev/null || true
-          git diff --staged --quiet || git commit -m "chore: scanner state [skip ci]"
-          git pull --rebase && git push || true
+          git diff --staged --quiet && exit 0
+          git commit -m "chore: scanner state [skip ci]"
+          git fetch origin main
+          git rebase origin/main
+          git push
