@@ -8,17 +8,20 @@ on:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Restore state cache
+        uses: actions/cache@v4
+        with:
+          path: logs/
+          key: scanner-state-${{ github.run_id }}
+          restore-keys: scanner-state-
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -38,14 +41,3 @@ jobs:
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
           NOTIFY_PHONE_CARRIER_EMAIL: ${{ secrets.NOTIFY_PHONE_CARRIER_EMAIL }}
         run: python3 scanner_underdog.py --auto
-
-      - name: Commit state cache
-        continue-on-error: true
-        run: |
-          git config user.name "scanner-bot"
-          git config user.email "scanner-bot@noreply"
-          git add logs/.seen_bugs.json logs/.seen_flash.json logs/.seen_promos.json \
-                  logs/.line_snapshot.json logs/.seen_ud_bugs.json 2>/dev/null || true
-          git diff --staged --quiet && exit 0
-          git commit -m "chore: scanner state [skip ci]"
-          git push --force
