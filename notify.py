@@ -169,27 +169,36 @@ def format_bugs_email(bugs: list) -> tuple[str, str, str]:
         gap_str = f"+{gap} easier" if gap > 0 else "same line"
         moved = f"  (std moved {b['prev_std']} to {b['standard']})" if b.get("prev_std") else ""
         start = b.get("start_time", "")[:16].replace("T", " ")
+        is_goblin = "goblin" in b.get("bug_type", "")
+        line_label = "Goblin Line" if is_goblin else "Demon Line"
+        line_color = "#e53e3e" if is_goblin else "#38a169"
+        accent     = "#c05621" if is_goblin else "#e53e3e"
         cards += _CARD.format(
-            accent="#e53e3e",
+            accent=accent,
             player=b["player"],
             league=b["league"],
             cells=(
                 _cell("Stat", b["stat"]) +
-                _cell("Demon Line", b["bug_line"], "#38a169") +
+                _cell(line_label, b["bug_line"], line_color) +
                 _cell("Standard", b["standard"], "#718096") +
-                _cell("Edge", gap_str, "#38a169") +
+                _cell("Edge", gap_str, line_color) +
                 _cell("Game Time", start, "#4a5568")
             ),
         )
         plain_lines.append(
             f"  {b['player']} {b['stat']} [{b['league']}]: "
-            f"demon={b['bug_line']} std={b['standard']} ({gap_str}){moved} {start}"
+            f"{'goblin' if is_goblin else 'demon'}={b['bug_line']} std={b['standard']} ({gap_str}){moved} {start}"
         )
 
     if bugs:
         b0 = bugs[0]
-        edge_desc = f"{b0['gap']} units easier than standard at demon payout" if b0.get("gap") else "same difficulty as standard pick but higher payout"
-        tip = f"Bet DEMON OVER {b0['bug_line']} — {edge_desc}"
+        is_goblin0 = "goblin" in b0.get("bug_type", "")
+        if is_goblin0:
+            edge_desc = f"goblin {b0['bug_line']} is HARDER than standard {b0['standard']} — avoid this pick"
+            tip = f"AVOID goblin {b0['bug_line']} — {edge_desc}"
+        else:
+            edge_desc = f"{b0['gap']} units easier than standard at demon payout" if b0.get("gap") else "same difficulty as standard pick but higher payout"
+            tip = f"Bet DEMON OVER {b0['bug_line']} — {edge_desc}"
     else:
         tip = ""
 

@@ -114,7 +114,10 @@ def run():
     correlated     = find_correlated_legs(consensus_edges)
 
     actionable = [b for b in static_bugs if b["bug_type"] in ("demon_easy", "demon_eq_standard")]
-    all_bugs   = actionable + move_bugs
+    # Only alert on demon-type movement bugs — goblin_hard are traps to avoid, not bet signals
+    move_demon_bugs  = [b for b in move_bugs if b["bug_type"] == "line_moved_demon_easy"]
+    move_goblin_traps = [b for b in move_bugs if b["bug_type"] == "line_moved_goblin_hard"]
+    all_bugs   = actionable + move_demon_bugs
 
     seen_bugs      = _load_seen(SEEN_BUGS_PATH)
     seen_flash     = _load_seen(SEEN_FLASH_PATH)
@@ -139,6 +142,13 @@ def run():
     # Correlated parlays for new consensus edges only
     new_correlated = find_correlated_legs(new_consensus)
 
+    # Log goblin traps for awareness (no alert — these are "avoid" warnings, not bet signals)
+    if move_goblin_traps:
+        _log(f"⚠️  {len(move_goblin_traps)} goblin trap(s) detected (std dropped below goblin — avoid):")
+        for b in move_goblin_traps:
+            _log(f"  ⚠ {b['league']} | {b['player']} {b['stat']} | "
+                 f"goblin={b['bug_line']} > std={b['standard']} [std moved {b.get('prev_std','')}→{b['standard']}]")
+
     total_new = len(new_bugs) + len(new_flash) + len(new_promos) + len(new_consensus)
 
     if total_new == 0:
@@ -150,10 +160,11 @@ def run():
     if new_bugs:
         _log(f"🚨 {len(new_bugs)} NEW BUG(S):")
         for b in new_bugs:
-            gap_str = f"gap={b['gap']}" if b.get("gap", 0) > 0 else "SAME LINE"
-            moved   = f" [std moved {b['prev_std']}→{b['standard']}]" if b.get("prev_std") else ""
+            gap_str    = f"gap={b['gap']}" if b.get("gap", 0) > 0 else "SAME LINE"
+            moved      = f" [std moved {b['prev_std']}→{b['standard']}]" if b.get("prev_std") else ""
+            line_label = "goblin" if "goblin" in b.get("bug_type", "") else "demon"
             _log(f"  ★ {b['league']} | {b['player']} {b['stat']} | "
-                 f"demon={b['bug_line']} std={b['standard']} ({gap_str}){moved} | "
+                 f"{line_label}={b['bug_line']} std={b['standard']} ({gap_str}){moved} | "
                  f"{b.get('start_time','')[:16]}")
 
         subject, html, plain = format_bugs_email(new_bugs)
