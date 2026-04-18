@@ -26,6 +26,7 @@ from scanner_bugs import (
     find_flash_sales,
     find_promos,
     find_adjusted_standard_lines,
+    find_multiplier_value_bugs,
     HOURS_AHEAD_DEFAULT,
 )
 from scanner_consensus import find_consensus_edges, find_correlated_legs, print_consensus_edges
@@ -112,6 +113,7 @@ def run():
     flash_sales    = find_flash_sales(projections, players, HOURS_AHEAD)
     promos         = find_promos(projections, players, HOURS_AHEAD)
     adj_standards  = find_adjusted_standard_lines(groups)
+    mult_bugs      = find_multiplier_value_bugs(groups)
     consensus_edges = find_consensus_edges(projections, players)
     correlated     = find_correlated_legs(consensus_edges)
 
@@ -158,6 +160,24 @@ def run():
         for b in move_goblin_traps:
             _log(f"  ⚠ {b['league']} | {b['player']} {b['stat']} | "
                  f"goblin={b['bug_line']} > std={b['standard']} [std moved {b.get('prev_std','')}→{b['standard']}]")
+
+    # Multiplier value bugs: goblin-no-adjustment = exploit (alert!), demon-no-adjustment = trap (log only)
+    mult_exploits = [b for b in mult_bugs if b["bug_type"] == "goblin_no_adjustment"]
+    mult_traps    = [b for b in mult_bugs if b["bug_type"] == "demon_no_adjustment"]
+    if mult_traps:
+        for b in mult_traps:
+            _log(f"  ⛔ {b['league']} | {b['player']} {b['stat']} demon={b['bug_line']} — hard pick at standard payout, AVOID")
+    if mult_exploits:
+        _log(f"🔥 {len(mult_exploits)} MULTIPLIER VALUE BUG(S) — goblin paying standard rate!")
+        for b in mult_exploits:
+            _log(f"  🔥 {b['league']} | {b['player']} {b['stat']} goblin={b['bug_line']} std={b['standard']} — easy pick at standard payout!")
+        top = mult_exploits[0]
+        sms = (f"MULT BUG: {top['player']} {top['stat']} goblin={top['bug_line']} "
+               f"paying standard rate — easy pick, standard payout!")
+        if len(mult_exploits) > 1:
+            sms += f" +{len(mult_exploits)-1} more"
+        from notify import send_push
+        send_push(sms, title="Multiplier Value Bug!")
 
     total_new = len(new_bugs) + len(new_flash) + len(new_promos) + len(new_consensus)
 

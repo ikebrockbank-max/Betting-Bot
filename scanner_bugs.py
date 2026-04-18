@@ -165,6 +165,8 @@ def _group_lines(projections: list, players: dict, hours_ahead: int) -> tuple[di
     groups: dict = defaultdict(lambda: {
         "standard": None, "demon": [], "goblin": [],
         "standard_adjusted": False,   # True if PP flagged the standard line with adjusted_odds
+        "demon_adjusted": [],         # parallel list: adjusted_odds value per demon line
+        "goblin_adjusted": [],        # parallel list: adjusted_odds value per goblin line
         "league_id": None, "start_time": "",
     })
     game_info: dict = {}
@@ -213,13 +215,15 @@ def _group_lines(projections: list, players: dict, hours_ahead: int) -> tuple[di
         key = (pname, stat, game_id, lid)
         entry = groups[key]
 
+        adj = attrs.get("adjusted_odds")
         if ot == "standard":
             entry["standard"] = line
             # Track whether PP flagged this standard line with a non-baseline multiplier
-            if attrs.get("adjusted_odds") is True:
+            if adj is True:
                 entry["standard_adjusted"] = True
         else:
             entry[ot].append(line)
+            entry[f"{ot}_adjusted"].append(adj)
 
         if entry["league_id"] is None:
             entry["league_id"] = lid
@@ -369,6 +373,83 @@ def find_adjusted_standard_lines(groups: dict) -> list[dict]:
 
     # Sort: likely-boosted first, then by league+player
     results.sort(key=lambda x: (not x["likely_boosted"], x["league"], x["player"]))
+    return results
+
+
+# ── Multiplier value bug detector ────────────────────────────────────────────
+# Every demon/goblin line SHOULD have adjusted_odds=True. If it doesn't, the
+# multiplier adjustment wasn't loaded — you have the label without the payout:
+#   goblin + no adjustment = easy line paying STANDARD rates  → EXPLOIT
+#   demon  + no adjustment = hard line paying STANDARD rates  → TRAP (avoid)
+
+def find_multiplier_value_bugs(groups: dict) -> list[dict]:
+    """
+    Find demon/goblin lines where adjusted_odds is not True.
+    These have the odds_type label but the multiplier value wasn't applied:
+      - goblin without adjustment: easier pick at standard payout → exploit
+      - demon without adjustment:  harder pick at standard payout → trap/avoid
+    """
+    results = []
+    for (player, stat, game_id, _lid), entry in groups.items():
+        lid = entry.get("league_id")
+        league = LEAGUE_NAMES.get(lid, f"league_{lid}")
+        s = entry.get("standard")
+        start_time = entry.get("start_time", "")
+
+        demon_lines    = entry.get("demon", [])
+        demon_adjusted = entry.get("demon_adjusted", [])
+        goblin_lines   = entry.get("goblin", [])
+        goblin_adjusted = entry.get("goblin_adjusted", [])
+
+        # Check each goblin line
+        for i, (g_line, g_adj) in enumerate(zip(goblin_lines, goblin_adjusted)):
+            if g_adj is not True:
+                gap = round(s - g_line, 2) if s is not None else None
+                results.append({
+                    "player":     player,
+                    "stat":       stat,
+                    "league":     league,
+                    "league_id":  lid,
+                    "game_id":    game_id,
+                    "start_time": start_time,
+                    "bug_type":   "goblin_no_adjustment",
+                    "bug_line":   g_line,
+                    "standard":   s,
+                    "gap":        gap,
+                    "adjusted_odds_value": g_adj,
+                    "description": (
+                        f"Goblin {g_line} has adjusted_odds={g_adj!r} — "
+                        f"goblin label but standard multiplier applied! Easy pick at standard payout."
+                    ),
+                })
+
+        # Check each demon line
+        for i, (d_line, d_adj) in enumerate(zip(demon_lines, demon_adjusted)):
+            if d_adj is not True:
+                gap = round(d_line - s, 2) if s is not None else None
+                results.append({
+                    "player":     player,
+                    "stat":       stat,
+                    "league":     league,
+                    "league_id":  lid,
+                    "game_id":    game_id,
+                    "start_time": start_time,
+                    "bug_type":   "demon_no_adjustment",
+                    "bug_line":   d_line,
+                    "standard":   s,
+                    "gap":        gap,
+                    "adjusted_odds_value": d_adj,
+                    "description": (
+                        f"Demon {d_line} has adjusted_odds={d_adj!r} — "
+                        f"demon label but standard multiplier applied! Hard pick at standard payout."
+                    ),
+                })
+
+    # Goblins first (exploitable), then demons (traps), sorted by gap
+    results.sort(key=lambda x: (
+        0 if x["bug_type"] == "goblin_no_adjustment" else 1,
+        -(x["gap"] or 0),
+    ))
     return results
 
 
@@ -654,8 +735,10 @@ def scan_bugs(sport: str = "nba", show_all_lines: bool = False, hours_ahead: int
     flash_sales   = find_flash_sales(projections, players, hours_ahead)
     promos        = find_promos(projections, players, hours_ahead)
     adj_standards = find_adjusted_standard_lines(groups)
+    mult_bugs     = find_multiplier_value_bugs(groups)
 
     _print_bugs(actionable + move_bugs, avoid, league_name, game_info)
+    _print_multiplier_value_bugs(mult_bugs)
     _print_flash_sales(flash_sales)
     _print_promos(promos)
     _print_adjusted_standards(adj_standards)
@@ -698,8 +781,10 @@ def scan_all_leagues(show_all_lines: bool = False, hours_ahead: int = HOURS_AHEA
     flash_sales   = find_flash_sales(projections, players, hours_ahead)
     promos        = find_promos(projections, players, hours_ahead)
     adj_standards = find_adjusted_standard_lines(groups)
+    mult_bugs     = find_multiplier_value_bugs(groups)
 
     _print_bugs(actionable + move_bugs, avoid, "ALL LEAGUES", game_info)
+    _print_multiplier_value_bugs(mult_bugs)
     _print_flash_sales(flash_sales)
     _print_promos(promos)
     _print_adjusted_standards(adj_standards)
@@ -767,6 +852,26 @@ def _print_promos(promos: list):
             start = ln.get("start_time", "")[:16]
             print(f"    [{ln['league']}] {player} {ln['stat']}: "
                   f"{ln['odds_type']} line={ln['line']} (PROMO — boosted payout) | {start}")
+
+
+def _print_multiplier_value_bugs(bugs: list):
+    if not bugs:
+        return
+    exploits = [b for b in bugs if b["bug_type"] == "goblin_no_adjustment"]
+    traps    = [b for b in bugs if b["bug_type"] == "demon_no_adjustment"]
+    if exploits:
+        print(f"\n  💥 MULTIPLIER VALUE BUG — GOBLIN AT STANDARD PAYOUT ({len(exploits)}):")
+        print(f"     Goblin label but multiplier wasn't applied → easy pick pays standard rate!")
+        for b in exploits:
+            start = b.get("start_time", "")[:16]
+            print(f"    [{b['league']}] {b['player']} {b['stat']}: goblin={b['bug_line']} std={b['standard']} gap={b['gap']}")
+            print(f"      → BET GOBLIN LESS {b['bug_line']} — goblin difficulty, standard payout! | {start}")
+    if traps:
+        print(f"\n  ⛔ MULTIPLIER VALUE BUG — DEMON AT STANDARD PAYOUT ({len(traps)}):")
+        print(f"     Demon label but multiplier wasn't applied → hard pick pays standard rate. AVOID.")
+        for b in traps:
+            start = b.get("start_time", "")[:16]
+            print(f"    [{b['league']}] {b['player']} {b['stat']}: demon={b['bug_line']} std={b['standard']} | {start}")
 
 
 def _print_adjusted_standards(lines: list):
