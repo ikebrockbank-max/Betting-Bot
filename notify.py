@@ -286,7 +286,7 @@ def format_ud_bugs_email(bugs: list) -> tuple[str, str, str]:
     plain_lines = []
     for b in bugs:
         bug_type = b.get("bug_type", "")
-        if bug_type == "easy_alternate":
+        if bug_type in ("easy_alternate", "mispriced_alternate"):
             detail = (
                 f"<td style='color:green'><b>alt {b['alt_value']}</b> vs bal {b['balanced']}</td>"
                 f"<td>{b['alt_mult']:.3f}x</td>"

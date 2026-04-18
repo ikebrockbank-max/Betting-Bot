@@ -3,12 +3,12 @@ scanner_underdog.py — Underdog Fantasy bug detector.
 
 Detects two types of mispriced alternate lines:
 
-  easy_alternate   — alternate value < balanced AND higher_mult >= 0.55
-                     AND (balanced - alternate) >= 0.5.
-                     You get a boosted multiplier on a threshold easier than standard.
+  mispriced_alternate — alternate value < balanced AND higher_mult >= 1.0.
+                        Underdog is offering an easier line at the SAME or BETTER
+                        payout than balanced — strictly dominant, bet it every time.
 
-  expiring_line    — expires_at is non-null and within 4 hours from now.
-                     Flash-sale urgency — act before the line disappears.
+  expiring_line       — expires_at is non-null and within 4 hours from now.
+                        Flash-sale urgency — act before the line disappears.
 
 Run:
   python3 scanner_underdog.py              # all sports
@@ -37,7 +37,10 @@ UD_CSV_FIELDS = [
 ]
 
 # Thresholds
-_EASY_ALT_MIN_MULT = 0.55
+# A true bug: alternate is easier than balanced but payout is >= balanced payout.
+# Lower thresholds just flag normal product behavior (Underdog intentionally reduces
+# payout for easier alternates — that is not an edge).
+_EASY_ALT_MIN_MULT = 1.0
 _EASY_ALT_MIN_GAP = 0.5
 _EXPIRING_HOURS = 4
 
@@ -63,7 +66,8 @@ def _detect_bugs(grouped: dict) -> list[dict]:
             "expires_at": expires_at,
         }
 
-        # easy_alternate: alternate below balanced, good multiplier, meaningful gap
+        # mispriced_alternate: alternate below balanced but payout >= balanced payout.
+        # This is strictly dominant — easier target at same or better odds.
         if balanced is not None:
             for alt_value, higher_mult in alternates:
                 gap = round(balanced - alt_value, 4)
@@ -73,7 +77,7 @@ def _detect_bugs(grouped: dict) -> list[dict]:
                         "alt_value": alt_value,
                         "alt_mult": higher_mult,
                         "gap": gap,
-                        "bug_type": "easy_alternate",
+                        "bug_type": "mispriced_alternate",
                     })
 
         # expiring_line: non-null expires_at within the next 4 hours
@@ -107,20 +111,20 @@ def _print_bugs(bugs: list[dict], label: str = ""):
     print(f"{'='*65}")
     print(f"  Scan time: {ts}")
 
-    easy = [b for b in bugs if b["bug_type"] == "easy_alternate"]
+    easy = [b for b in bugs if b["bug_type"] == "mispriced_alternate"]
     expiring = [b for b in bugs if b["bug_type"] == "expiring_line"]
 
     if easy:
-        print(f"\n  EXPLOITABLE ALTERNATES ({len(easy)}) — easier than standard with boosted payout:")
+        print(f"\n  MISPRICED ALTERNATES ({len(easy)}) — easier than balanced at same or better payout:")
         for b in easy:
             print(
                 f"\n    * [{b['sport']}] {b['player']} — {b['stat']}"
                 f"\n      balanced={b['balanced']}  alt_line={b['alt_value']}"
                 f"  mult={b['alt_mult']:.3f}  gap={b['gap']}"
-                f"\n      -> BET HIGHER {b['alt_value']} — {b['gap']} easier than balanced at {b['alt_mult']:.3f}x payout!"
+                f"\n      -> BET OVER {b['alt_value']} — {b['gap']} easier than balanced at {b['alt_mult']:.3f}x payout!"
             )
     else:
-        print("\n  No exploitable alternate bugs found.")
+        print("\n  No mispriced alternate bugs found.")
 
     if expiring:
         print(f"\n  EXPIRING LINES ({len(expiring)}) — visible within next {_EXPIRING_HOURS}h:")
@@ -263,7 +267,7 @@ def auto_scan_underdog(sport_filter: str | None = None) -> list[dict]:
     subject, html, plain = format_ud_bugs_email(new_bugs)
     sms_lines = []
     for b in new_bugs[:3]:  # cap SMS at 3 entries
-        if b["bug_type"] == "easy_alternate":
+        if b["bug_type"] in ("easy_alternate", "mispriced_alternate"):
             sms_lines.append(
                 f"{b['player']} {b['stat']} [{b['sport']}]: "
                 f"alt={b['alt_value']} vs bal={b['balanced']} "
