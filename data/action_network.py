@@ -1,10 +1,10 @@
 """
 Action Network unofficial API client — no API key required.
 
-Provides multi-book player prop lines (over/under with odds) for NBA games,
-used as a drop-in replacement for The Odds API when credits run out.
+Provides multi-book player prop lines for NBA, MLB, NHL, NFL, WNBA.
+Books covered: DraftKings, FanDuel, BetMGM, Caesars, BetRivers, PointsBet.
 
-Coverage: DraftKings, FanDuel, BetMGM, Caesars, and others depending on game.
+No API key needed — completely free.
 """
 
 import json
@@ -22,26 +22,85 @@ HEADERS = {
     "Referer": "https://www.actionnetwork.com/",
 }
 
-# Cache directory (shared with odds.py cache)
 _CACHE_DIR = Path("logs/.odds_cache")
-_CACHE_TTL = 7200  # 2 hours — matches odds.py
+_CACHE_TTL = 7200  # 2 hours
 
-# Map AN prop type keys → our internal stat names (same as Odds API)
-AN_PROP_MAP = {
-    "core_bet_type_27_points":   "player_points",
-    "core_bet_type_23_rebounds": "player_rebounds",
-    "core_bet_type_26_assists":  "player_assists",
-    "core_bet_type_21_3fgm":     "player_threes",
-    "core_bet_type_580_turnovers": "player_turnovers",
+# Supported sports: AN scoreboard key → PP league IDs it covers
+SPORT_CONFIG = {
+    "nba":  {"league_ids": {7, 84, 192, 237, 250}, "endpoint": "nba"},
+    "mlb":  {"league_ids": {2},                     "endpoint": "mlb"},
+    "nhl":  {"league_ids": {8, 227, 231},            "endpoint": "nhl"},
+    "nfl":  {"league_ids": {9},                      "endpoint": "nfl"},
+    "wnba": {"league_ids": {3, 252},                 "endpoint": "wnba"},
 }
 
+# PP league_id → AN sport key (reverse lookup)
+LEAGUE_TO_SPORT = {
+    lid: sport
+    for sport, cfg in SPORT_CONFIG.items()
+    for lid in cfg["league_ids"]
+}
+
+# Action Network prop type keys → standard market key
+# Core IDs are consistent across sports; sport-specific ones added per sport
+AN_PROP_MAP = {
+    # Basketball (NBA / WNBA)
+    "core_bet_type_27_points":          "player_points",
+    "core_bet_type_23_rebounds":        "player_rebounds",
+    "core_bet_type_26_assists":         "player_assists",
+    "core_bet_type_21_3fgm":            "player_threes",
+    "core_bet_type_580_turnovers":      "player_turnovers",
+    "core_bet_type_569_blocks":         "player_blocks",
+    "core_bet_type_570_steals":         "player_steals",
+    "core_bet_type_571_pra":            "player_points_rebounds_assists",
+    "core_bet_type_572_pr":             "player_points_rebounds",
+    "core_bet_type_573_pa":             "player_points_assists",
+    "core_bet_type_574_ra":             "player_rebounds_assists",
+    # Baseball (MLB)
+    "core_bet_type_97_strikeouts":      "pitcher_strikeouts",
+    "core_bet_type_98_hits":            "batter_hits",
+    "core_bet_type_99_total_bases":     "batter_total_bases",
+    "core_bet_type_100_runs":           "batter_runs_scored",
+    "core_bet_type_101_rbis":           "batter_rbis",
+    "core_bet_type_102_home_runs":      "batter_home_runs",
+    # Hockey (NHL)
+    "core_bet_type_62_shots":           "player_shots_on_goal",
+    "core_bet_type_63_points":          "player_points",
+    "core_bet_type_64_goals":           "player_goals",
+    "core_bet_type_65_assists":         "player_assists",
+    # Football (NFL)
+    "core_bet_type_37_pass_yards":      "player_pass_yds",
+    "core_bet_type_38_rush_yards":      "player_rush_yds",
+    "core_bet_type_39_rec_yards":       "player_reception_yds",
+    "core_bet_type_40_receptions":      "player_receptions",
+    "core_bet_type_41_pass_tds":        "player_pass_tds",
+    "core_bet_type_42_rush_tds":        "player_rush_tds",
+    "core_bet_type_43_rec_tds":         "player_reception_tds",
+}
+
+BOOK_NAMES = {
+    "15":  "DraftKings",
+    "30":  "FanDuel",
+    "76":  "BetMGM",
+    "75":  "Caesars",
+    "123": "BetRivers",
+    "69":  "PointsBet",
+    "68":  "Barstool",
+    "79":  "Unibet",
+}
+
+
+# ── Cache helpers ─────────────────────────────────────────────────────────────
 
 def _cache_get(key: str):
     path = _CACHE_DIR / f"{key}.json"
     if path.exists():
-        data = json.loads(path.read_text())
-        if time.time() - data["ts"] < _CACHE_TTL:
-            return data["payload"]
+        try:
+            data = json.loads(path.read_text())
+            if time.time() - data["ts"] < _CACHE_TTL:
+                return data["payload"]
+        except Exception:
+            pass
     return None
 
 
@@ -52,103 +111,83 @@ def _cache_set(key: str, payload):
     )
 
 
-def get_events() -> list[dict]:
+# ── API calls ─────────────────────────────────────────────────────────────────
+
+def get_events(sport: str = "nba") -> list[dict]:
     """
-    Return today's NBA games from Action Network.
-    Each dict has: id, away_team, home_team, start_time.
+    Return today's games for a sport from Action Network.
+    Each dict: {id, away_team, home_team, start_time, status}
     """
-    cached = _cache_get("an_events_nba")
+    cache_key = f"an_events_{sport}"
+    cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
-    resp = requests.get(f"{AN_V1}/scoreboard/nba", headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = requests.get(
+            f"{AN_V1}/scoreboard/{sport}",
+            headers=HEADERS,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[action_network] Failed to fetch {sport} events: {e}")
+        return []
 
-    # Build team_id → name lookup from game data
-    team_lookup = {}
+    team_lookup: dict[int, str] = {}
     events = []
+
     for game in data.get("games", []):
         for team in game.get("teams", []):
-            team_lookup[team["id"]] = team["full_name"]
+            team_lookup[team["id"]] = team.get("full_name", team.get("name", ""))
 
-        away_name = team_lookup.get(game["away_team_id"], "")
-        home_name = team_lookup.get(game["home_team_id"], "")
-        if not away_name or not home_name:
-            continue
+        away = team_lookup.get(game.get("away_team_id", 0), "")
+        home = team_lookup.get(game.get("home_team_id", 0), "")
 
         events.append({
-            "id":        game["id"],
-            "away_team": away_name,
-            "home_team": home_name,
+            "id":         game["id"],
+            "away_team":  away,
+            "home_team":  home,
             "start_time": game.get("start_time", ""),
-            "status":    game.get("status", ""),
+            "status":     game.get("status", ""),
         })
 
-    _cache_set("an_events_nba", events)
+    _cache_set(cache_key, events)
     return events
 
 
 def get_player_props(game_id: int) -> dict:
     """
     Fetch multi-book player prop lines for a game.
-
-    Returns same structure as odds.py's get_player_props():
-        {
-          "bookmakers": [
-            {
-              "title": "DraftKings",
-              "markets": [
-                {
-                  "key": "player_points",
-                  "outcomes": [
-                    {"description": "LeBron James", "name": "Over",
-                     "price": -115, "point": 24.5},
-                    {"description": "LeBron James", "name": "Under",
-                     "price": -105, "point": 24.5},
-                  ]
-                }
-              ]
-            }
-          ]
-        }
+    Returns Odds API-compatible format:
+      {"bookmakers": [{"title": "DraftKings", "markets": [...]}]}
     """
     cache_key = f"an_props_{game_id}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
-    resp = requests.get(
-        f"{AN_BASE}/games/{game_id}/props",
-        headers=HEADERS,
-        timeout=15,
-    )
-    resp.raise_for_status()
-    raw = resp.json()
+    try:
+        resp = requests.get(
+            f"{AN_BASE}/games/{game_id}/props",
+            headers=HEADERS,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+    except Exception as e:
+        print(f"[action_network] Failed to fetch props for game {game_id}: {e}")
+        return {"bookmakers": []}
 
     # Build player_id → full_name lookup
     player_names = {
-        str(pid): info["full_name"]
+        str(pid): info.get("full_name", info.get("name", ""))
         for pid, info in raw.get("players", {}).items()
     }
 
-    # Collect lines: book_id → stat → [(player, side, line, odds)]
-    # AN book IDs: 15=DraftKings, 30=FanDuel, 76=BetMGM, 75=Caesars, 123=BetRivers
-    book_names = {
-        "15":  "DraftKings",
-        "30":  "FanDuel",
-        "76":  "BetMGM",
-        "75":  "Caesars",
-        "123": "BetRivers",
-        "69":  "PointsBet",
-        "68":  "Barstool",
-        "79":  "Unibet",
-        "247": "BetUS",
-        "71":  "Bovada",
-    }
-
-    # Intermediate structure: {book_id: {stat_key: {(player_name, line): {Over/Under: odds}}}}
-    by_book = {}
+    # {book_id: {stat_key: {(player_name, line): {Over/Under: odds}}}}
+    by_book: dict[str, dict] = {}
 
     for prop_type, outcomes in raw.get("player_props", {}).items():
         stat_key = AN_PROP_MAP.get(prop_type)
@@ -162,7 +201,7 @@ def get_player_props(game_id: int) -> dict:
                 continue
 
             for book_id_str, book_lines in outcome.get("lines", {}).items():
-                if book_id_str not in book_names:
+                if book_id_str not in BOOK_NAMES:
                     continue
                 for bl in book_lines:
                     side_raw = bl.get("side", "").lower()
@@ -174,17 +213,13 @@ def get_player_props(game_id: int) -> dict:
                     if line_val is None or odds_val is None:
                         continue
 
-                    if book_id_str not in by_book:
-                        by_book[book_id_str] = {}
-                    if stat_key not in by_book[book_id_str]:
-                        by_book[book_id_str][stat_key] = {}
-
+                    by_book.setdefault(book_id_str, {})
+                    by_book[book_id_str].setdefault(stat_key, {})
                     key = (player_name, float(line_val))
-                    if key not in by_book[book_id_str][stat_key]:
-                        by_book[book_id_str][stat_key][key] = {}
+                    by_book[book_id_str][stat_key].setdefault(key, {})
                     by_book[book_id_str][stat_key][key][side] = int(odds_val)
 
-    # Convert to Odds API compatible format
+    # Convert to Odds API format
     bookmakers = []
     for book_id_str, stats in by_book.items():
         markets = []
@@ -200,13 +235,39 @@ def get_player_props(game_id: int) -> dict:
                     })
             if outcomes_list:
                 markets.append({"key": stat_key, "outcomes": outcomes_list})
-
         if markets:
-            bookmakers.append({
-                "title":   book_names[book_id_str],
-                "markets": markets,
-            })
+            bookmakers.append({"title": BOOK_NAMES[book_id_str], "markets": markets})
 
     result = {"bookmakers": bookmakers}
     _cache_set(cache_key, result)
     return result
+
+
+# ── Multi-sport consensus fetch ───────────────────────────────────────────────
+
+def get_all_consensus(league_ids: set[int] | None = None) -> dict:
+    """
+    Fetch consensus lines for all supported sports (or filtered by league_ids).
+
+    Returns {(player_name_normalized, market_key): [list of book lines]}
+    — caller computes median.
+    """
+    sports_to_fetch = set(SPORT_CONFIG.keys())
+    if league_ids:
+        sports_to_fetch = {
+            LEAGUE_TO_SPORT[lid]
+            for lid in league_ids
+            if lid in LEAGUE_TO_SPORT
+        }
+
+    all_props: dict = {}  # game_id → props
+    for sport in sports_to_fetch:
+        try:
+            events = get_events(sport)
+            for ev in events:
+                props = get_player_props(ev["id"])
+                all_props[ev["id"]] = props
+        except Exception as e:
+            print(f"[action_network] Error fetching {sport}: {e}")
+
+    return all_props

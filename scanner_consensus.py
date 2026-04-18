@@ -43,17 +43,8 @@ STAT_TO_MARKET = {
     "Rebounds+Assists":    "player_rebounds_assists",
 }
 
-# PP league IDs that Action Network covers (NBA only for now)
-AN_SUPPORTED_LEAGUES = {7, 84, 192, 237, 250}  # NBA + sub-leagues
-
-# Odds API sport keys for non-AN leagues
-ODDS_API_SPORT_MAP = {
-    9:   "americanfootball_nfl",
-    2:   "baseball_mlb",
-    8:   "icehockey_nhl",
-    3:   "basketball_wnba",
-    12:  "mma_mixed_martial_arts",
-}
+# All PP league IDs covered by Action Network (NBA, MLB, NHL, NFL, WNBA)
+AN_SUPPORTED_LEAGUES = {7, 84, 192, 237, 250, 2, 8, 227, 231, 9, 3, 252}
 
 
 # ── Name normalization ────────────────────────────────────────────────────────
@@ -99,42 +90,37 @@ def _extract_consensus(bookmakers: list[dict]) -> dict[tuple[str, str], float]:
 
 # ── Action Network consensus (NBA, free) ──────────────────────────────────────
 
-def _get_an_consensus() -> dict[tuple[str, str], float]:
-    """Fetch NBA consensus from Action Network. Returns empty dict on error."""
+def _get_an_consensus(league_ids: set[int] | None = None) -> dict[tuple[str, str], float]:
+    """
+    Fetch sportsbook consensus from Action Network (free, no key needed).
+    Covers NBA, MLB, NHL, NFL, WNBA. Returns empty dict on error.
+    """
     try:
-        from data.action_network import get_events, get_player_props
-        events = get_events()
+        from data.action_network import get_all_consensus, get_events, get_player_props, LEAGUE_TO_SPORT, SPORT_CONFIG
+
+        # Determine which sports to fetch
+        if league_ids:
+            sports = {LEAGUE_TO_SPORT[lid] for lid in league_ids if lid in LEAGUE_TO_SPORT}
+        else:
+            sports = set(SPORT_CONFIG.keys())
+
         consensus: dict[tuple[str, str], float] = {}
-        for ev in events:
+        for sport in sports:
             try:
-                props = get_player_props(ev["id"])
-                consensus.update(_extract_consensus(props.get("bookmakers", [])))
-            except Exception:
+                events = get_events(sport)
+                for ev in events:
+                    try:
+                        props = get_player_props(ev["id"])
+                        consensus.update(_extract_consensus(props.get("bookmakers", [])))
+                    except Exception:
+                        continue
+            except Exception as e:
+                print(f"[consensus] AN fetch failed for {sport}: {e}")
                 continue
+
         return consensus
     except Exception as e:
         print(f"[consensus] Action Network fetch failed: {e}")
-        return {}
-
-
-# ── Odds API consensus (NFL/MLB/NHL, uses credits) ────────────────────────────
-
-def _get_odds_api_consensus(sport_key: str, markets: list[str]) -> dict[tuple[str, str], float]:
-    """Fetch consensus for one sport from The Odds API. Returns empty dict on error."""
-    try:
-        from data.odds import get_events, get_player_props
-        events = get_events(sport_key.split("_")[-1]  # extract short key e.g. "nfl"
-                            if "_" in sport_key else sport_key)
-        consensus: dict[tuple[str, str], float] = {}
-        for ev in events:
-            try:
-                props = get_player_props(sport_key.split("_")[-1], ev["id"], markets)
-                consensus.update(_extract_consensus(props.get("bookmakers", [])))
-            except Exception:
-                continue
-        return consensus
-    except Exception as e:
-        print(f"[consensus] Odds API fetch failed for {sport_key}: {e}")
         return {}
 
 
@@ -186,7 +172,7 @@ def find_consensus_edges(
     Returns list of edge dicts, sorted by abs_diff descending.
     """
     # ── Build consensus maps ──────────────────────────────────────────────────
-    print("[consensus] Fetching Action Network consensus (NBA)...")
+    print("[consensus] Fetching Action Network consensus (NBA/MLB/NHL/NFL/WNBA)...")
     an_consensus = _get_an_consensus()
     print(f"[consensus] {len(an_consensus)} (player, stat) consensus lines from Action Network")
 
@@ -216,16 +202,16 @@ def find_consensus_edges(
         if not market:
             continue
 
-        # Use Action Network for NBA leagues
-        if lid in AN_SUPPORTED_LEAGUES and an_consensus:
-            norm_name = _normalize(pname)
-            consensus_line = an_consensus.get((norm_name, market))
-            if consensus_line is None:
-                continue
-            edge = _compare(pp_line, consensus_line, pname, stat, league,
-                            source="action_network", platform="pp")
-            if edge:
-                edges.append(edge)
+            if lid not in AN_SUPPORTED_LEAGUES or not an_consensus:
+            continue
+        norm_name = _normalize(pname)
+        consensus_line = an_consensus.get((norm_name, market))
+        if consensus_line is None:
+            continue
+        edge = _compare(pp_line, consensus_line, pname, stat, league,
+                        source="action_network", platform="pp")
+        if edge:
+            edges.append(edge)
 
     edges.sort(key=lambda e: e["abs_diff"], reverse=True)
     return edges
@@ -242,7 +228,7 @@ def find_ud_consensus_edges(grouped: dict) -> list[dict]:
 
     Returns list of edge dicts sorted by abs_diff descending.
     """
-    print("[consensus] Fetching Action Network consensus for Underdog comparison...")
+    print("[consensus] Fetching Action Network consensus for Underdog comparison (NBA/MLB/NHL/WNBA)...")
     an_consensus = _get_an_consensus()
     if not an_consensus:
         return []
