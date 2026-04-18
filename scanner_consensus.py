@@ -202,7 +202,7 @@ def find_consensus_edges(
         if not market:
             continue
 
-            if lid not in AN_SUPPORTED_LEAGUES or not an_consensus:
+        if lid not in AN_SUPPORTED_LEAGUES or not an_consensus:
             continue
         norm_name = _normalize(pname)
         consensus_line = an_consensus.get((norm_name, market))
