@@ -82,11 +82,13 @@ def send_push(message: str, title: str = "PP Bot Alert") -> bool:
     """
     if not NTFY_TOPIC:
         return False
+    # HTTP headers must be ASCII — strip any non-ASCII characters from title
+    safe_title = title.encode("ascii", errors="ignore").decode("ascii").strip()
     try:
         resp = requests.post(
             f"https://ntfy.sh/{NTFY_TOPIC}",
             data=message.encode("utf-8"),
-            headers={"Title": title, "Priority": "high", "Tags": "money_with_wings"},
+            headers={"Title": safe_title, "Priority": "high", "Tags": "money_with_wings"},
             timeout=10,
         )
         resp.raise_for_status()
