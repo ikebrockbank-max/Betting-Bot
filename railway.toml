@@ -1,0 +1,6 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "python3 scheduler.py"
+restartPolicyType = "always"

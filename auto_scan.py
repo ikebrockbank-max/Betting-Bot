@@ -1,0 +1,179 @@
+"""
+auto_scan.py — scheduled bug scanner with email + SMS alerts.
+
+Runs the full all-leagues PrizePicks bug scan, deduplicates against
+previously-seen bugs, and fires email/SMS alerts for anything new.
+
+Also sends macOS notifications when running locally.
+
+Run manually:   python3 auto_scan.py
+Cloud loop:     python3 scheduler.py   (runs this every SCAN_INTERVAL_MIN minutes)
+"""
+
+import json
+import subprocess
+import sys
+from datetime import datetime, UTC
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from scanner_bugs import (
+    _fetch_all_projections,
+    _group_lines,
+    _find_bugs,
+    find_line_movement_bugs,
+    find_flash_sales,
+    find_promos,
+    HOURS_AHEAD_DEFAULT,
+)
+from notify import (
+    alert,
+    format_bugs_email,
+    format_flash_email,
+    format_promo_email,
+    send_sms,
+)
+
+SEEN_BUGS_PATH  = Path("logs/.seen_bugs.json")
+SEEN_FLASH_PATH = Path("logs/.seen_flash.json")
+SEEN_PROMO_PATH = Path("logs/.seen_promos.json")
+SCAN_LOG_PATH   = Path("logs/auto_scan.log")
+HOURS_AHEAD     = HOURS_AHEAD_DEFAULT
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _load_seen(path: Path) -> set:
+    if path.exists():
+        try:
+            return set(json.loads(path.read_text()))
+        except Exception:
+            pass
+    return set()
+
+
+def _save_seen(path: Path, seen: set):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(sorted(seen)))
+
+
+def _bug_key(b: dict) -> str:
+    return f"{b['player']}|{b['stat']}|{b['game_id']}|{b['bug_line']}|{b['bug_type']}"
+
+def _flash_key(s: dict) -> str:
+    return f"{s['player']}|{s['stat']}|{s['game_id']}|{s['sale_line']}"
+
+def _promo_key(p: dict) -> str:
+    return f"{p['player']}|{p['stat']}|{p['game_id']}|{p['odds_type']}|{p['line']}"
+
+
+def _mac_notify(title: str, message: str):
+    """macOS Notification Center — silently skipped on non-Mac / cloud."""
+    try:
+        script = f'display notification "{message}" with title "{title}" sound name "Ping"'
+        subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
+    except Exception:
+        pass
+
+
+def _log(msg: str):
+    ts   = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    line = f"[{ts}] {msg}"
+    print(line)
+    SCAN_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(SCAN_LOG_PATH, "a") as f:
+        f.write(line + "\n")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def run():
+    _log("=== Auto-scan started ===")
+
+    try:
+        projections, players = _fetch_all_projections(league_id=None, hours_ahead=HOURS_AHEAD)
+        _log(f"Fetched {len(projections)} projections, {len(players)} players")
+    except Exception as e:
+        _log(f"ERROR fetching projections: {e}")
+        return
+
+    groups, _ = _group_lines(projections, players, HOURS_AHEAD)
+
+    static_bugs = _find_bugs(groups)
+    move_bugs   = find_line_movement_bugs(groups)
+    flash_sales = find_flash_sales(projections, players, HOURS_AHEAD)
+    promos      = find_promos(projections, players, HOURS_AHEAD)
+
+    actionable = [b for b in static_bugs if b["bug_type"] in ("demon_easy", "demon_eq_standard")]
+    all_bugs   = actionable + move_bugs
+
+    seen_bugs  = _load_seen(SEEN_BUGS_PATH)
+    seen_flash = _load_seen(SEEN_FLASH_PATH)
+    seen_promo = _load_seen(SEEN_PROMO_PATH)
+
+    new_bugs   = [b for b in all_bugs   if _bug_key(b)   not in seen_bugs]
+    new_flash  = [s for s in flash_sales if _flash_key(s) not in seen_flash]
+    new_promos = [p for p in promos     if _promo_key(p) not in seen_promo]
+
+    for b in new_bugs:   seen_bugs.add(_bug_key(b))
+    for s in new_flash:  seen_flash.add(_flash_key(s))
+    for p in new_promos: seen_promo.add(_promo_key(p))
+
+    _save_seen(SEEN_BUGS_PATH,  seen_bugs)
+    _save_seen(SEEN_FLASH_PATH, seen_flash)
+    _save_seen(SEEN_PROMO_PATH, seen_promo)
+
+    total_new = len(new_bugs) + len(new_flash) + len(new_promos)
+
+    if total_new == 0:
+        _log(f"Scan complete — {len(all_bugs)} known bug(s), "
+             f"{len(flash_sales)} flash sale(s), {len(promos)} promo(s) — nothing new.")
+        return
+
+    # ── New bugs ──────────────────────────────────────────────────────────────
+    if new_bugs:
+        _log(f"🚨 {len(new_bugs)} NEW BUG(S):")
+        for b in new_bugs:
+            gap_str = f"gap={b['gap']}" if b.get("gap", 0) > 0 else "SAME LINE"
+            moved   = f" [std moved {b['prev_std']}→{b['standard']}]" if b.get("prev_std") else ""
+            _log(f"  ★ {b['league']} | {b['player']} {b['stat']} | "
+                 f"demon={b['bug_line']} std={b['standard']} ({gap_str}){moved} | "
+                 f"{b.get('start_time','')[:16]}")
+
+        subject, html, plain = format_bugs_email(new_bugs)
+        sms = f"🚨 PP Bug: {new_bugs[0]['player']} {new_bugs[0]['stat']} demon={new_bugs[0]['bug_line']} vs std={new_bugs[0]['standard']}"
+        if len(new_bugs) > 1:
+            sms += f" (+{len(new_bugs)-1} more)"
+        alert(subject, html, plain, sms)
+        _mac_notify(subject, sms)
+
+    # ── Flash sales ───────────────────────────────────────────────────────────
+    if new_flash:
+        _log(f"⚡ {len(new_flash)} NEW FLASH SALE(S):")
+        for s in new_flash:
+            _log(f"  ⚡ {s['league']} | {s['player']} {s['stat']} | "
+                 f"{s['normal_line']}→{s['sale_line']} (−{s['discount']}) | "
+                 f"{s.get('start_time','')[:16]}")
+
+        subject, html, plain = format_flash_email(new_flash)
+        sms = f"⚡ PP Flash Sale: {new_flash[0]['player']} {new_flash[0]['stat']} {new_flash[0]['normal_line']}→{new_flash[0]['sale_line']} ACT FAST"
+        alert(subject, html, plain, sms)
+        _mac_notify(subject, sms)
+
+    # ── Promos ────────────────────────────────────────────────────────────────
+    if new_promos:
+        _log(f"🎯 {len(new_promos)} NEW PROMO(S):")
+        for p in new_promos:
+            _log(f"  🎯 {p['league']} | {p['player']} {p['stat']} | "
+                 f"{p['odds_type']} {p['line']} (PROMO) | {p.get('start_time','')[:16]}")
+
+        subject, html, plain = format_promo_email(new_promos)
+        names = ", ".join(f"{p['player']} {p['stat']}" for p in new_promos[:2])
+        sms   = f"🎯 PP Promo: {names}" + (f" +{len(new_promos)-2} more" if len(new_promos) > 2 else "")
+        alert(subject, html, plain, sms)
+        _mac_notify(subject, sms)
+
+
+if __name__ == "__main__":
+    run()
