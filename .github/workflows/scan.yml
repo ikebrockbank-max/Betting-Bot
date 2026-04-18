@@ -48,6 +48,4 @@ jobs:
                   logs/.line_snapshot.json logs/.seen_ud_bugs.json 2>/dev/null || true
           git diff --staged --quiet && exit 0
           git commit -m "chore: scanner state [skip ci]"
-          git fetch origin main
-          git rebase -X ours origin/main
-          git push
+          git push --force
