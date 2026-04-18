@@ -39,7 +39,7 @@ SEEN_BUGS_PATH  = Path("logs/.seen_bugs.json")
 SEEN_FLASH_PATH = Path("logs/.seen_flash.json")
 SEEN_PROMO_PATH = Path("logs/.seen_promos.json")
 SCAN_LOG_PATH   = Path("logs/auto_scan.log")
-HOURS_AHEAD     = HOURS_AHEAD_DEFAULT
+HOURS_AHEAD     = 168  # 7 days ahead
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
