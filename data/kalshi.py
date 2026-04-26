@@ -19,12 +19,17 @@ TRADING_URL = "https://trading-api.kalshi.com/trade-api/v2"
 
 KEY_ID = os.getenv("KALSHI_API_KEY_ID")
 PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH", "kalshi_private_key.pem")
+PRIVATE_KEY_B64  = os.getenv("KALSHI_PRIVATE_KEY_BASE64", "")
 
 _MARKET_CACHE_PATH = Path("logs/.kalshi_market_cache.json")
 _MARKET_CACHE_TTL  = 300  # seconds
 
 
 def _load_private_key():
+    # Cloud deploy: key stored as base64 env var
+    if PRIVATE_KEY_B64:
+        pem_bytes = base64.b64decode(PRIVATE_KEY_B64)
+        return serialization.load_pem_private_key(pem_bytes, password=None)
     with open(PRIVATE_KEY_PATH, "rb") as f:
         return serialization.load_pem_private_key(f.read(), password=None)
 
