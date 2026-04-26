@@ -1,18 +1,44 @@
 """
 Phase 1 scanner: detect edges between Kalshi sports props and sportsbook consensus.
-No trading — logs opportunities only.
+Logs opportunities and sends push + email notifications for new edges.
 
 Run: python3 scanner.py
 """
 
 import csv
+import json
 import re
+import sys
 import time
 from datetime import datetime, UTC
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+
 from data import kalshi, odds, action_network as an
 from models.edge import evaluate_market
+from notify import send_push, send_email
+
+SEEN_EDGES_PATH = Path("logs/.seen_kalshi_edges.json")
+
+# ── PrizePicks breakeven rates (2-6 pick parlays) ─────────────────────────────
+PP_BREAKEVEN = {2: 0.577, 3: 0.585, 4: 0.562, 5: 0.550, 6: 0.540}
+
+
+def pp_value_rating(fair_prob: float, side: str) -> str:
+    """
+    Returns a text rating for using this pick on PrizePicks.
+    For YES side: higher fair_prob = better OVER pick.
+    For NO side: (1 - fair_prob) compared against breakeven.
+    """
+    p = fair_prob if side == "YES" else (1.0 - fair_prob)
+    if p >= 0.70:
+        return "Elite PP pick"
+    if p >= 0.63:
+        return "Good PP pick"
+    if p >= 0.578:
+        return "Marginal PP pick"
+    return "Skip on PP"
 
 PRICE_HISTORY_PATH = Path("logs/price_history.csv")
 PRICE_HISTORY_FIELDS = [
@@ -347,10 +373,10 @@ def scan_nba_markets():
     print(f"  Markets evaluated : {evaluated}")
     print(f"  Edges found       : {edges_found}")
     if edge_opps:
-        avg_edge = sum(o.best_edge for o in edge_opps) / len(edge_opps)
-        avg_size = sum(o.kalshi_size_ask for o in edge_opps) / len(edge_opps)
-        avg_quality = sum(o.edge_quality for o in edge_opps) / len(edge_opps)
-        total_ev = sum(o.best_edge for o in edge_opps)
+        avg_edge    = sum(o.best_edge        for o in edge_opps) / len(edge_opps)
+        avg_size    = sum(o.kalshi_size_ask  for o in edge_opps) / len(edge_opps)
+        avg_quality = sum(o.edge_quality     for o in edge_opps) / len(edge_opps)
+        total_ev    = sum(o.best_edge        for o in edge_opps)
         print(f"  Avg edge          : {avg_edge:.2%}")
         print(f"  Avg size          : ${avg_size:.0f}")
         print(f"  Avg quality score : {avg_quality:.1f}")
@@ -361,6 +387,115 @@ def scan_nba_markets():
             print(f"    {o.description[:40]:<40} edge={o.best_edge:.1%} size=${o.kalshi_size_ask:.0f} quality={o.edge_quality:.1f} [{o.liquidity_tier}]")
     print(f"\n  Log: logs/edges.csv")
     print(f"{'='*60}\n")
+
+    # ── Notifications — deduplicated ──────────────────────────────────────────
+    if not edge_opps:
+        return
+
+    # Load seen edge keys (ticker + side) to avoid repeat alerts same game day
+    try:
+        seen = set(json.loads(SEEN_EDGES_PATH.read_text())) if SEEN_EDGES_PATH.exists() else set()
+    except Exception:
+        seen = set()
+
+    def _edge_key(o) -> str:
+        return f"{o.kalshi_ticker}|{o.best_side}"
+
+    new_edges = [o for o in edge_opps if _edge_key(o) not in seen]
+    for o in new_edges:
+        seen.add(_edge_key(o))
+
+    # Persist
+    SEEN_EDGES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SEEN_EDGES_PATH.write_text(json.dumps(sorted(seen)))
+
+    if not new_edges:
+        print("[scanner] All edges already alerted — nothing new to send.")
+        return
+
+    # Sort by quality so best edge leads the alert
+    new_edges.sort(key=lambda o: -o.edge_quality)
+
+    # ── Push notification ─────────────────────────────────────────────────────
+    top = new_edges[0]
+    push_msg = (
+        f"Kalshi: {top.description[:50]} | "
+        f"BET {top.best_side} edge={top.best_edge:.1%} size=${top.kalshi_size_ask:.0f}"
+    )
+    if len(new_edges) > 1:
+        push_msg += f" +{len(new_edges)-1} more"
+    send_push(push_msg, title="📈 Kalshi Edge Found!")
+    print(f"[scanner] Push sent: {push_msg[:80]}")
+
+    # ── Email ─────────────────────────────────────────────────────────────────
+    try:
+        subject, html, plain = _format_kalshi_edge_email(new_edges)
+        send_email(subject, html, plain)
+        print(f"[scanner] Email sent: {subject}")
+    except Exception as e:
+        print(f"[scanner] Email error (non-fatal): {e}")
+
+
+def _format_kalshi_edge_email(edges: list) -> tuple[str, str, str]:
+    """Build clean HTML + plain email for Kalshi edge opportunities."""
+    from notify import _SIMPLE_WRAP, _SIMPLE_CARD, _simple_row
+
+    count = len(edges)
+    top   = edges[0]
+    subject = (
+        f"Kalshi: BET {top.best_side} {top.description[:40]} — {top.best_edge:.1%} edge"
+    )
+    if count > 1:
+        subject += f" (+{count-1} more)"
+
+    cards = ""
+    plain_lines = []
+
+    for o in edges:
+        is_yes = o.best_side == "YES"
+        accent = "#1a7a4a" if is_yes else "#c0392b"
+        action_label = f"BET {o.best_side}"
+        rating = pp_value_rating(o.fair_prob, o.best_side)
+
+        # Build the Kalshi market URL from the ticker
+        kalshi_url = f"https://kalshi.com/markets/{o.kalshi_ticker.split('-')[0].lower()}/{o.kalshi_ticker}"
+
+        rows = (
+            _simple_row("Stat / market", o.description[:55]) +
+            _simple_row("Edge vs ask", f"{o.best_edge:.1%}", accent) +
+            _simple_row("Fair prob", f"{o.fair_prob:.1%}", "#1a202c") +
+            _simple_row("Kalshi ask", f"{o.kalshi_yes_ask:.1%}", "#718096") +
+            _simple_row("PP value (OVER side)", rating,
+                        "#1a7a4a" if "Elite" in rating or "Good" in rating
+                        else ("#b7791f" if "Marginal" in rating else "#718096")) +
+            f'<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px;">'
+            f'<tr><td>'
+            f'<a href="{kalshi_url}" style="display:inline-block;padding:8px 16px;'
+            f'background:{accent};color:#fff;font-size:13px;font-weight:700;'
+            f'border-radius:6px;text-decoration:none;">View on Kalshi &rarr;</a>'
+            f'</td></tr></table>'
+        )
+
+        cards += _SIMPLE_CARD.format(
+            accent=accent,
+            action=action_label,
+            subtitle=f"{o.description[:45]} &bull; {o.notes}",
+            rows=rows,
+        )
+
+        plain_lines.append(
+            f"  BET {o.best_side}: {o.description} | edge={o.best_edge:.1%} "
+            f"fair={o.fair_prob:.1%} ask={o.kalshi_yes_ask:.1%} | PP: {rating}"
+        )
+
+    html = _SIMPLE_WRAP.format(
+        header_color="#1a56db",
+        header_title=f"Kalshi: {count} Edge{'s' if count > 1 else ''} Found",
+        header_sub="Vig-adjusted fair probability vs sportsbook consensus",
+        body=cards,
+    )
+    plain = subject + "\n\n" + "\n".join(plain_lines)
+    return subject, html, plain
 
 
 if __name__ == "__main__":

@@ -274,7 +274,10 @@ def _find_bugs(groups: dict) -> list[dict]:
 
         is_ladder = len(demon_lines) > 1  # multiple demon thresholds = NBA/NHL ladder
 
-        for d in demon_lines:
+        demon_adjusted_list = entry.get("demon_adjusted", [])
+        for i, d in enumerate(demon_lines):
+            d_adj = demon_adjusted_list[i] if i < len(demon_adjusted_list) else None
+
             if s is None:
                 continue
             # Skip if a goblin at the same threshold handles this line in the app
@@ -284,9 +287,13 @@ def _find_bugs(groups: dict) -> list[dict]:
             gap = round(s - d, 2)
 
             if d == s:
-                # Always a bug: "demon" label on the SAME threshold as standard.
-                # App shows it as a demon pick but it's standard difficulty → free multiplier.
-                # Works for all sports regardless of ladder presence.
+                # Only a real exploit when the demon line has an elevated multiplier
+                # (adjusted_odds=True). If adjusted_odds is False/None the demon pays
+                # the same rate as standard — no edge. That case is already tracked by
+                # find_multiplier_value_bugs() as "demon_no_adjustment" (a trap, not exploit).
+                if d_adj is not True:
+                    continue
+                # Bug: "demon" label on the SAME threshold as standard, but with elevated payout.
                 bugs.append({**base, "bug_line": d, "bug_type": "demon_eq_standard", "gap": 0.0,
                               "description": f"Demon {d} == Standard {s} — same difficulty, demon payout!"})
 

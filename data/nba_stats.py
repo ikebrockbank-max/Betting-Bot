@@ -23,13 +23,33 @@ NBA_HEADERS = {
 
 CACHE_PATH = Path("logs/.nba_player_cache.json")
 
-# PrizePicks stat name → NBA stats column
+# PrizePicks / ParlayPlay stat name → NBA game-log column
 STAT_COL = {
-    "Points":   "PTS",
-    "Rebounds": "REB",
-    "Assists":  "AST",
-    "3-PT Made": "FG3M",
-    "Turnovers": "TOV",
+    "Points":            "PTS",
+    "Rebounds":          "REB",
+    "Assists":           "AST",
+    "3-PT Made":         "FG3M",
+    "3-Pointers Made":   "FG3M",
+    "3PT Made":          "FG3M",
+    "Turnovers":         "TOV",
+    "Blocks":            "BLK",
+    "Steals":            "STL",
+}
+
+# Combined stats: sum these columns per game
+COMBINED_STAT_COLS: dict[str, list[str]] = {
+    "Pts+Reb+Ast":             ["PTS", "REB", "AST"],
+    "Points+Rebounds+Assists": ["PTS", "REB", "AST"],
+    "Pts + Reb + Ast":         ["PTS", "REB", "AST"],
+    "Points+Rebounds":         ["PTS", "REB"],
+    "Pts+Reb":                 ["PTS", "REB"],
+    "Pts + Reb":               ["PTS", "REB"],
+    "Points+Assists":          ["PTS", "AST"],
+    "Pts+Ast":                 ["PTS", "AST"],
+    "Pts + Ast":               ["PTS", "AST"],
+    "Rebounds+Assists":        ["REB", "AST"],
+    "Reb+Ast":                 ["REB", "AST"],
+    "Reb + Ast":               ["REB", "AST"],
 }
 
 # Minutes change thresholds for flagging
@@ -100,6 +120,8 @@ def get_player_stats(
 ) -> dict | None:
     """
     Fetch game log and return stat + minutes context.
+    Supports single stats (Points, Rebounds, ...) and combined stats
+    (Pts+Reb+Ast, Points+Rebounds, etc.) via COMBINED_STAT_COLS.
 
     Returns dict with:
         player_id       int
@@ -111,43 +133,50 @@ def get_player_stats(
 
         season_min      float   — avg minutes per game (season)
         l5_min          float   — avg minutes per game (last 5)
-        min_change_pct  float   — how much l5_min differs from season_min (e.g. +0.18 = 18% more)
+        min_change_pct  float   — how much l5_min differs from season_min
         minutes_flag    str|None — "elevated" | "reduced" | None
 
         season_per36    float   — stat per 36 minutes (season)
         l5_per36        float   — stat per 36 minutes (last 5)
-        per36_change    float   — change in per-36 rate (positive = genuinely improving)
+        per36_change    float   — change in per-36 rate
 
     Returns None if player not found or stat unsupported.
     """
-    col = STAT_COL.get(stat_type)
-    if not col:
+    # Determine columns to fetch
+    col  = STAT_COL.get(stat_type)
+    cols = COMBINED_STAT_COLS.get(stat_type)  # list of cols to sum, or None
+    if not col and not cols:
         return None
+    fetch_cols = cols if cols else [col]
 
     players = _load_player_ids()
     player_id = _find_player_id(player_name, players)
     if not player_id:
         return None
 
-    try:
-        resp = requests.get(
-            "https://stats.nba.com/stats/playergamelog",
-            headers=NBA_HEADERS,
-            params={
-                "PlayerID": player_id,
-                "Season": season,
-                "SeasonType": "Regular Season",
-                "LeagueID": "00",
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-    except Exception:
-        return None
-
-    data = resp.json()
-    rows = data["resultSets"][0]["rowSet"]
-    hdrs = data["resultSets"][0]["headers"]
+    rows, hdrs = [], []
+    for season_type in ("Playoffs", "Regular Season"):
+        try:
+            resp = requests.get(
+                "https://stats.nba.com/stats/playergamelog",
+                headers=NBA_HEADERS,
+                params={
+                    "PlayerID": player_id,
+                    "Season": season,
+                    "SeasonType": season_type,
+                    "LeagueID": "00",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            rows = data["resultSets"][0]["rowSet"]
+            hdrs = data["resultSets"][0]["headers"]
+            if rows:
+                break  # got data — stop trying
+            time.sleep(0.3)
+        except Exception:
+            continue
 
     if not rows:
         return None
@@ -157,10 +186,14 @@ def get_player_stats(
 
     for row in rows:
         g = dict(zip(hdrs, row))
-        val = g.get(col)
+        # Sum all required columns for this game
+        try:
+            val = sum(float(g[c]) for c in fetch_cols if g.get(c) is not None)
+        except (TypeError, KeyError):
+            continue
         mins = _parse_minutes(g.get("MIN"))
-        if val is not None and mins > 0:
-            all_vals.append(float(val))
+        if mins > 0:
+            all_vals.append(val)
             all_mins.append(mins)
 
     if not all_vals:
