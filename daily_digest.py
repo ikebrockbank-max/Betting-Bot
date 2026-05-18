@@ -263,7 +263,7 @@ def run():
     # Guard: only fire once per day
     if _load_last_date() == today:
         _log(f"[digest] Already sent for {today} — skipping")
-        return
+        return True  # already sent counts as done
 
     _log(f"[digest] Running daily digest for {today}")
 
@@ -302,7 +302,7 @@ def run():
 
     if not all_picks_combined:
         _log("[digest] No qualifying picks across any sport — skipping digest")
-        return
+        return False
 
     # Sort combined picks by prob
     all_picks_combined.sort(key=lambda p: p["prob"], reverse=True)
@@ -333,9 +333,10 @@ def run():
         _log(f"[digest] Sent: {subject}")
     except Exception as e:
         _log(f"[digest] Send error: {e}")
-        return
+        return False
 
     _save_last_date(today)
+    return True
 
 
 if __name__ == "__main__":

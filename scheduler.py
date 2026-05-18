@@ -22,7 +22,7 @@ INTERNAL_ARB_INTERVAL_MIN  = int(os.getenv("INTERNAL_ARB_INTERVAL_MIN",  "15")) 
 INJURY_POLL_INTERVAL_SEC   = int(os.getenv("INJURY_POLL_INTERVAL_SEC",   "120")) # injury check (seconds)
 PARLAY_SCAN_INTERVAL_MIN   = int(os.getenv("PARLAY_SCAN_INTERVAL_MIN",   "30"))  # PP parlay builder
 PP_REPORT_INTERVAL_MIN     = int(os.getenv("PP_REPORT_INTERVAL_MIN",     "30"))  # pre-game PP parlay report
-DAILY_DIGEST_HOUR_UTC      = int(os.getenv("DAILY_DIGEST_HOUR_UTC",      "15"))  # daily digest hour (UTC)
+DAILY_DIGEST_HOUR_UTC      = int(os.getenv("DAILY_DIGEST_HOUR_UTC",      "17"))  # daily digest hour (UTC) — 1pm ET default
 
 
 def log(msg: str):
@@ -159,8 +159,10 @@ def main():
             try:
                 import daily_digest
                 importlib.reload(daily_digest)
-                daily_digest.run()
-                last_daily_digest = today
+                sent = daily_digest.run()
+                # Only mark done if digest actually sent — if no picks found, retry next loop
+                if sent:
+                    last_daily_digest = today
             except Exception:
                 log(f"ERROR during daily digest:\n{traceback.format_exc()}")
 
