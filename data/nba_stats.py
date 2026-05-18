@@ -21,7 +21,8 @@ NBA_HEADERS = {
     "x-nba-stats-token": "true",
 }
 
-CACHE_PATH = Path("logs/.nba_player_cache.json")
+CACHE_PATH       = Path("logs/.nba_player_cache.json")
+STATS_CACHE_PATH = Path("logs/.nba_stats_cache.json")   # per-player stats, TTL 4h
 
 # PrizePicks / ParlayPlay stat name → NBA game-log column
 STAT_COL = {
@@ -55,6 +56,21 @@ COMBINED_STAT_COLS: dict[str, list[str]] = {
 # Minutes change thresholds for flagging
 MIN_BUMP_PCT   = 0.15   # L5 minutes > 15% above season avg → elevated role
 MIN_DROP_PCT   = 0.15   # L5 minutes > 15% below season avg → reduced role
+
+
+STATS_CACHE_TTL = 4 * 3600  # 4 hours
+
+def _load_stats_cache() -> dict:
+    try:
+        if STATS_CACHE_PATH.exists():
+            return json.loads(STATS_CACHE_PATH.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_stats_cache(cache: dict):
+    STATS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STATS_CACHE_PATH.write_text(json.dumps(cache))
 
 
 def _load_player_ids() -> dict[str, int]:
@@ -142,6 +158,13 @@ def get_player_stats(
 
     Returns None if player not found or stat unsupported.
     """
+    # Check stats cache first (4h TTL)
+    cache_key = f"{player_name.lower()}|{stat_type}|{season}"
+    _sc = _load_stats_cache()
+    _entry = _sc.get(cache_key)
+    if _entry and (time.time() - _entry.get("ts", 0)) < STATS_CACHE_TTL:
+        return _entry.get("data")
+
     # Determine columns to fetch
     col  = STAT_COL.get(stat_type)
     cols = COMBINED_STAT_COLS.get(stat_type)  # list of cols to sum, or None
@@ -255,7 +278,7 @@ def get_player_stats(
     else:
         minutes_flag = None
 
-    return {
+    result = {
         "player_id":           player_id,
         "season_avg":          round(season_avg, 2),
         "l10_avg":             round(l10_avg, 2),
@@ -271,6 +294,11 @@ def get_player_stats(
         "l5_per36":            round(l5_per36, 2),
         "per36_change":        round(per36_change, 2),
     }
+    # Save to cache
+    _sc = _load_stats_cache()
+    _sc[cache_key] = {"ts": time.time(), "data": result}
+    _save_stats_cache(_sc)
+    return result
 
 
 def get_stats_bulk(

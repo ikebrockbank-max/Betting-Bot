@@ -15,7 +15,9 @@ from pathlib import Path
 import requests
 
 ESPN_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-CACHE_PATH   = Path("logs/.wnba_player_cache.json")
+CACHE_PATH       = Path("logs/.wnba_player_cache.json")
+STATS_CACHE_PATH = Path("logs/.wnba_stats_cache.json")
+STATS_CACHE_TTL  = 4 * 3600  # 4 hours
 
 ESPN_TEAMS_URL   = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams"
 ESPN_ROSTER_URL  = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams/{team_id}/roster"
@@ -39,6 +41,19 @@ COMBINED_STAT_COLS: dict[str, list[str]] = {
 
 MIN_BUMP_PCT = 0.15
 MIN_DROP_PCT = 0.15
+
+
+def _load_stats_cache() -> dict:
+    try:
+        if STATS_CACHE_PATH.exists():
+            return json.loads(STATS_CACHE_PATH.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_stats_cache(cache: dict):
+    STATS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STATS_CACHE_PATH.write_text(json.dumps(cache))
 
 
 def _load_player_ids() -> dict[str, str]:
@@ -170,6 +185,13 @@ def get_player_stats(
         return None
     fetch_cols = cols if cols else [col]
 
+    # Check stats cache first (4h TTL)
+    cache_key = f"{player_name.lower()}|{stat_type}|{season}"
+    _sc = _load_stats_cache()
+    _entry = _sc.get(cache_key)
+    if _entry and (time.time() - _entry.get("ts", 0)) < STATS_CACHE_TTL:
+        return _entry.get("data")
+
     try:
         players = _load_player_ids()
     except Exception:
@@ -248,7 +270,7 @@ def get_player_stats(
     else:
         minutes_flag = None
 
-    return {
+    result = {
         "player_id":          athlete_id,
         "season_avg":         round(season_avg, 2),
         "l10_avg":            round(l10_avg, 2),
@@ -264,3 +286,7 @@ def get_player_stats(
         "l5_per36":           round(l5_per36, 2),
         "per36_change":       round(per36_change, 2),
     }
+    _sc = _load_stats_cache()
+    _sc[cache_key] = {"ts": time.time(), "data": result}
+    _save_stats_cache(_sc)
+    return result

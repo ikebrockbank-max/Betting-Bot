@@ -12,8 +12,10 @@ from pathlib import Path
 
 import requests
 
-MLB_BASE   = "https://statsapi.mlb.com/api/v1"
-CACHE_PATH = Path("logs/.mlb_player_cache.json")
+MLB_BASE         = "https://statsapi.mlb.com/api/v1"
+CACHE_PATH       = Path("logs/.mlb_player_cache.json")
+STATS_CACHE_PATH = Path("logs/.mlb_stats_cache.json")
+STATS_CACHE_TTL  = 4 * 3600  # 4 hours
 
 STAT_COL: dict[str, str | list] = {
     "Hits":                "hits",
@@ -31,6 +33,19 @@ STAT_COL: dict[str, str | list] = {
 }
 
 HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+
+def _load_stats_cache() -> dict:
+    try:
+        if STATS_CACHE_PATH.exists():
+            return json.loads(STATS_CACHE_PATH.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_stats_cache(cache: dict):
+    STATS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STATS_CACHE_PATH.write_text(json.dumps(cache))
 
 
 def _load_player_cache() -> dict:
@@ -148,6 +163,13 @@ def get_player_stats(
     if col is None:
         return None
 
+    # Check stats cache first (4h TTL)
+    cache_key = f"{player_name.lower()}|{stat_type}|{season}"
+    _sc = _load_stats_cache()
+    _entry = _sc.get(cache_key)
+    if _entry and (time.time() - _entry.get("ts", 0)) < STATS_CACHE_TTL:
+        return _entry.get("data")
+
     cache = _load_player_cache()
     player_id = _lookup_player_id(player_name, cache)
     _save_player_cache(cache)
@@ -198,7 +220,7 @@ def get_player_stats(
     l10_avg    = sum(all_vals[:n10]) / n10
     l5_avg     = sum(all_vals[:n5])  / n5
 
-    return {
+    result = {
         "player_id":          player_id,
         "season_avg":         round(season_avg, 2),
         "l10_avg":            round(l10_avg, 2),
@@ -214,3 +236,7 @@ def get_player_stats(
         "l5_per36":           0.0,
         "per36_change":       0.0,
     }
+    _sc = _load_stats_cache()
+    _sc[cache_key] = {"ts": time.time(), "data": result}
+    _save_stats_cache(_sc)
+    return result
