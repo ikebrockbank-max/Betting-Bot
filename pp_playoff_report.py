@@ -29,6 +29,31 @@ from data.nba_stats  import get_player_stats as nba_get_stats
 from data.injuries   import get_injury_report
 from notify          import send_push, send_email
 
+# ── Optional context modules (all fail gracefully) ─────────────────────────────
+try:
+    from data.vegas_odds       import get_game_totals, get_team_implied, compare_pp_to_books
+    _VEGAS_AVAILABLE = True
+except Exception:
+    _VEGAS_AVAILABLE = False
+
+try:
+    from data.opponent_defense import get_opponent_context
+    _DEFENSE_AVAILABLE = True
+except Exception:
+    _DEFENSE_AVAILABLE = False
+
+try:
+    from data.mlb_weather      import get_park_weather
+    _WEATHER_AVAILABLE = True
+except Exception:
+    _WEATHER_AVAILABLE = False
+
+try:
+    from data.lineups          import is_player_starting, get_all_lineups, get_mlb_probable_pitcher
+    _LINEUPS_AVAILABLE = True
+except Exception:
+    _LINEUPS_AVAILABLE = False
+
 # ── Sport Configuration ────────────────────────────────────────────────────────
 
 SPORT_CONFIG = {
@@ -197,10 +222,15 @@ def _score_pick(
     direction: str,
     stats: dict,
     injury: dict | None,
+    opponent_context: dict | None = None,
+    vegas_edge: dict | None = None,
+    weather: dict | None = None,
+    is_starting: bool | None = None,
 ) -> tuple[float, str]:
     """
     Score a single pick direction. Returns (probability 0-1, human reason string).
-    Uses L5 hit rate, L5 avg gap, season avg, minutes trend, and injury.
+    Uses L5 hit rate, L5 avg gap, season avg, minutes trend, injury,
+    opponent defense, Vegas line edge, weather, and lineup status.
     """
     l5 = stats.get("last_5", [])
     n5 = len(l5)
@@ -280,6 +310,62 @@ def _score_pick(
             inj_bonus = -0.06
             inj_note  = f"⚠ {injury.get('status','Questionable')} ({injury.get('detail','')})"
 
+    # ── 7. Opponent defense adjustment ────────────────────────────────────────
+    opp_bonus = 0.0
+    opp_note  = ""
+    if opponent_context:
+        adj = opponent_context.get("prob_adjustment", 0.0)
+        if direction == "OVER":
+            opp_bonus = -adj  # good defense hurts OVER
+        else:
+            opp_bonus = adj   # good defense helps UNDER
+        if abs(adj) >= 0.02:
+            opp_note = opponent_context.get("description", "")
+
+    # ── 8. Vegas line edge ────────────────────────────────────────────────────
+    vegas_bonus = 0.0
+    vegas_note  = ""
+    if vegas_edge:
+        edge = vegas_edge.get("edge_pct", 0.0)
+        if direction == "OVER" and edge > 3:
+            vegas_bonus = min(0.04, edge / 100)
+            vegas_note  = f"PP line {edge:.1f}% below books ({vegas_edge['book_line']})"
+        elif direction == "OVER" and edge < -3:
+            vegas_bonus = max(-0.04, edge / 100)
+            vegas_note  = f"PP line {abs(edge):.1f}% above books ({vegas_edge['book_line']})"
+        elif direction == "UNDER" and edge < -3:
+            vegas_bonus = min(0.04, abs(edge) / 100)
+            vegas_note  = f"PP line {abs(edge):.1f}% above books ({vegas_edge['book_line']})"
+        elif direction == "UNDER" and edge > 3:
+            vegas_bonus = max(-0.04, -edge / 100)
+
+    # ── 9. Weather adjustment (MLB) ───────────────────────────────────────────
+    weather_bonus = 0.0
+    weather_note  = ""
+    if weather:
+        boost             = weather.get("over_boost", 0.0)
+        stat_type_lower   = stat_type.lower()
+        weather_relevant  = any(
+            s in stat_type_lower
+            for s in ["home run", "total base", "hits", "run"]
+        )
+        if weather_relevant and abs(boost) >= 0.02:
+            if direction == "OVER":
+                weather_bonus = boost
+            else:
+                weather_bonus = -boost
+            weather_note = weather.get("description", "")
+
+    # ── 10. Lineup / starting confirmation ───────────────────────────────────
+    lineup_bonus = 0.0
+    lineup_note  = ""
+    if is_starting is False:
+        # Confirmed not in starting lineup — skip this pick entirely
+        return 0.0, "Not in starting lineup — skip"
+    elif is_starting is True:
+        lineup_bonus = 0.01
+        lineup_note  = "✓ Confirmed starter"
+
     # ── Combine ───────────────────────────────────────────────────────────────
     prob = (
         l5_rate      * 0.50
@@ -289,6 +375,10 @@ def _score_pick(
         + trend_bonus
         + min_bonus
         + inj_bonus
+        + opp_bonus
+        + vegas_bonus
+        + weather_bonus
+        + lineup_bonus
     )
     prob = max(0.10, min(0.94, prob))
 
@@ -307,6 +397,14 @@ def _score_pick(
         parts.append(min_note)
     if inj_note:
         parts.append(inj_note)
+    if opp_note:
+        parts.append(opp_note)
+    if vegas_note:
+        parts.append(vegas_note)
+    if weather_note:
+        parts.append(weather_note)
+    if lineup_note:
+        parts.append(lineup_note)
 
     return prob, " • ".join(parts)
 
@@ -316,6 +414,11 @@ def score_all_picks(
     injury_report: dict,
     stats_fn=None,
     skip_combined: bool = False,
+    sport: str = "NBA",
+    vegas_totals: list = [],
+    weather_map: dict = {},
+    lineup_data: dict = {},
+    games_list: list[dict] = [],
 ) -> list[dict]:
     """
     Score every PP projection. Returns list of pick dicts with prob and reason.
@@ -325,9 +428,54 @@ def score_all_picks(
     stats_fn: callable(player_name, stat_type) -> dict | None
               Defaults to nba_get_stats.
     skip_combined: if True, skip stat types containing '+' (MLB single-stat only).
+    sport: sport string for context lookups.
+    vegas_totals: list of game total dicts from get_game_totals().
+    weather_map: dict of home_team -> weather dict (MLB only).
+    lineup_data: dict from get_all_lineups() (used internally by is_player_starting).
+    games_list: list of game dicts (from get_tonight_games) for team→opponent mapping.
     """
     if stats_fn is None:
         stats_fn = nba_get_stats
+
+    # Build team → opponent map from games list
+    team_opponent_map: dict[str, str] = {}
+    for g in games_list:
+        home = g.get("home_team", "")
+        away = g.get("away_team", "")
+        if home:
+            team_opponent_map[home.lower()] = away
+        if away:
+            team_opponent_map[away.lower()] = home
+        # Also index by abbreviations
+        home_abbr = g.get("home_abbr", "")
+        away_abbr = g.get("away_abbr", "")
+        if home_abbr:
+            team_opponent_map[home_abbr.lower()] = away
+        if away_abbr:
+            team_opponent_map[away_abbr.lower()] = home
+
+    # Lazy-import context modules
+    _get_opponent_context = None
+    _compare_pp_to_books  = None
+    _is_player_starting   = None
+
+    try:
+        from data.opponent_defense import get_opponent_context as _goc
+        _get_opponent_context = _goc
+    except Exception:
+        pass
+
+    try:
+        from data.vegas_odds import compare_pp_to_books as _cpb
+        _compare_pp_to_books = _cpb
+    except Exception:
+        pass
+
+    try:
+        from data.lineups import is_player_starting as _ips
+        _is_player_starting = _ips
+    except Exception:
+        pass
 
     picks = []
     seen  = set()
@@ -336,6 +484,7 @@ def score_all_picks(
         player    = proj["player"]
         stat_type = proj["stat_type"]
         line      = proj["line"]
+        team      = proj.get("team", "")
         key       = (player.lower(), stat_type)
 
         if key in seen:
@@ -359,23 +508,78 @@ def score_all_picks(
             last = player.lower().split()[-1]
             inj  = next((v for k, v in injury_report.items() if k.endswith(last)), None)
 
+        # ── Context lookups ───────────────────────────────────────────────────
+
+        # Opponent team
+        opponent_team = team_opponent_map.get(team.lower(), "")
+
+        # Opponent defense context
+        opp_ctx = None
+        if _get_opponent_context and opponent_team:
+            try:
+                opp_ctx = _get_opponent_context(sport, opponent_team, stat_type)
+            except Exception:
+                pass
+
+        # Vegas line comparison
+        vegas_edge = None
+        if _compare_pp_to_books:
+            try:
+                vegas_edge = _compare_pp_to_books(player, stat_type, line, sport)
+            except Exception:
+                pass
+
+        # Weather (MLB only)
+        weather = None
+        if sport == "MLB" and weather_map:
+            # Match home team for the player's game
+            for home_key, w in weather_map.items():
+                if home_key.lower() in team.lower() or team.lower() in home_key.lower():
+                    weather = w
+                    break
+            # Also check opponent team (player could be away team)
+            if weather is None and opponent_team:
+                opp_last = opponent_team.strip().lower().split()[-1]
+                for home_key, w in weather_map.items():
+                    if home_key.strip().lower().split()[-1] == opp_last:
+                        weather = w
+                        break
+
+        # Lineup / starting status
+        is_starting = None
+        if _is_player_starting:
+            try:
+                is_starting = _is_player_starting(player, sport, team)
+            except Exception:
+                pass
+
         # Score both directions, keep the better one
         best = None
         for direction in ("OVER", "UNDER"):
-            prob, reason = _score_pick(player, stat_type, line, direction, stats, inj)
+            prob, reason = _score_pick(
+                player, stat_type, line, direction, stats, inj,
+                opponent_context=opp_ctx,
+                vegas_edge=vegas_edge,
+                weather=weather,
+                is_starting=is_starting,
+            )
             if prob >= MIN_PICK_PROB:
                 if best is None or prob > best["prob"]:
                     best = {
-                        "player":    player,
-                        "stat_type": stat_type,
-                        "line":      line,
-                        "direction": direction,
-                        "team":      proj.get("team", ""),
-                        "game_id":   proj.get("game_id", ""),
-                        "prob":      round(prob, 3),
-                        "reason":    reason,
-                        "stats":     stats,
-                        "injury":    inj,
+                        "player":           player,
+                        "stat_type":        stat_type,
+                        "line":             line,
+                        "direction":        direction,
+                        "team":             team,
+                        "game_id":          proj.get("game_id", ""),
+                        "prob":             round(prob, 3),
+                        "reason":           reason,
+                        "stats":            stats,
+                        "injury":           inj,
+                        "opponent_context": opp_ctx,
+                        "vegas_edge":       vegas_edge,
+                        "weather":          weather,
+                        "is_starting":      is_starting,
                     }
 
         if best:
@@ -537,6 +741,64 @@ def _pick_card_html(pick: dict) -> str:
             f'&#9888;&#65039; {status}{" — " + detail if detail else ""}</span></td></tr>'
         )
 
+    # ── Context rows (Vegas, Defense, Weather, Lineup) ───────────────────────
+    context_rows = ""
+
+    vegas_edge       = pick.get("vegas_edge")
+    opponent_context = pick.get("opponent_context")
+    weather          = pick.get("weather")
+    is_starting      = pick.get("is_starting")
+
+    if vegas_edge:
+        edge     = vegas_edge.get("edge_pct", 0.0)
+        bk_line  = vegas_edge.get("book_line", "")
+        pp_ln    = vegas_edge.get("pp_line", line)
+        edge_clr = "#16a34a" if edge > 0 else "#dc2626"
+        edge_sgn = f"+{edge:.1f}%" if edge >= 0 else f"{edge:.1f}%"
+        context_rows += (
+            f'<p style="margin:2px 0;font-size:12px;color:{edge_clr};">'
+            f'&#128202; Books: {bk_line} vs PP: {pp_ln} ({edge_sgn} edge)</p>'
+        )
+
+    if opponent_context:
+        opp_label = opponent_context.get("label", "")
+        opp_desc  = opponent_context.get("description", "")
+        opp_adj   = opponent_context.get("prob_adjustment", 0.0)
+        if direction == "OVER":
+            effective_adj = -opp_adj
+        else:
+            effective_adj = opp_adj
+        opp_clr = "#dc2626" if effective_adj < -0.01 else "#16a34a" if effective_adj > 0.01 else "#6b7280"
+        context_rows += (
+            f'<p style="margin:2px 0;font-size:12px;color:{opp_clr};">'
+            f'&#127961; {opp_label} — {opp_desc}</p>'
+        )
+
+    if weather:
+        w_desc  = weather.get("description", "")
+        w_boost = weather.get("over_boost", 0.0)
+        w_clr   = "#16a34a" if w_boost > 0.01 else "#dc2626" if w_boost < -0.01 else "#6b7280"
+        context_rows += (
+            f'<p style="margin:2px 0;font-size:12px;color:{w_clr};">'
+            f'&#127780; {w_desc}</p>'
+        )
+
+    if is_starting is True:
+        context_rows += (
+            '<p style="margin:2px 0;font-size:12px;color:#16a34a;">'
+            '&#10003; Confirmed starter</p>'
+        )
+
+    context_section = ""
+    if context_rows:
+        context_section = (
+            f'<div style="border-top:1px solid #f3f4f6;padding-top:8px;margin-top:6px;">'
+            f'<p style="margin:0 0 4px;font-size:10px;color:#9ca3af;text-transform:uppercase;'
+            f'letter-spacing:0.4px;">Context</p>'
+            f'{context_rows}'
+            f'</div>'
+        )
+
     return f"""\
 <table width="100%" cellpadding="0" cellspacing="0"
        style="margin-bottom:10px;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
@@ -582,6 +844,7 @@ def _pick_card_html(pick: dict) -> str:
       </table>
       <p style="margin:0;font-size:12px;color:#4b5563;line-height:1.6;
                 border-top:1px solid #f3f4f6;padding-top:8px;">{reason}</p>
+      {context_section}
     </td>
   </tr>
   {inj_banner}
@@ -716,14 +979,51 @@ def format_report_email(
     if not inj_rows:
         inj_rows = '<p style="margin:0;font-size:13px;color:#16a34a;">No significant injury concerns.</p>'
 
+    # MLB weather summary for context card
+    weather_rows = ""
+    if sport == "MLB" and games:
+        try:
+            from data.mlb_weather import get_park_weather
+            for g in games:
+                home_name = g.get("home_full", g.get("home_team", ""))
+                w = get_park_weather(home_name)
+                if w:
+                    boost      = w.get("over_boost", 0.0)
+                    w_desc     = w.get("description", "")
+                    park_name  = w.get("park", home_name)
+                    w_clr      = "#16a34a" if boost > 0.01 else "#dc2626" if boost < -0.01 else "#6b7280"
+                    boost_note = f" (+OVER)" if boost > 0.01 else " (+UNDER)" if boost < -0.01 else ""
+                    weather_rows += (
+                        f'<p style="margin:0 0 3px;font-size:13px;color:{w_clr};">'
+                        f'&#127780; {g.get("home_abbr", park_name)}: {w_desc}{boost_note}</p>'
+                    )
+        except Exception:
+            pass
+
     # Games list (multi-game nights)
     game_rows = ""
     for g in games:
         et = (g["start_time"] - timedelta(hours=4)).strftime("%I:%M %p ET").lstrip("0")
         m  = int(g["mins_until"])
+        # Probable pitchers for MLB
+        pitcher_note = ""
+        if sport == "MLB":
+            try:
+                from data.lineups import get_mlb_probable_pitcher
+                home_p = get_mlb_probable_pitcher(g.get("home_full", g.get("home_team", "")), away=False)
+                away_p = get_mlb_probable_pitcher(g.get("home_full", g.get("home_team", "")), away=True)
+                pitchers = []
+                if home_p:
+                    pitchers.append(f"{g.get('home_abbr', 'HOM')}: {home_p}")
+                if away_p:
+                    pitchers.append(f"{g.get('away_abbr', 'AWY')}: {away_p}")
+                if pitchers:
+                    pitcher_note = f" &nbsp;&#8226;&nbsp; SP: {' / '.join(pitchers)}"
+            except Exception:
+                pass
         game_rows += (
             f'<p style="margin:0 0 3px;font-size:13px;color:#374151;">'
-            f'<strong>{g["away_full"]} @ {g["home_full"]}</strong> &nbsp;&#8226;&nbsp; {et} ({m}m)</p>'
+            f'<strong>{g["away_full"]} @ {g["home_full"]}</strong> &nbsp;&#8226;&nbsp; {et} ({m}m){pitcher_note}</p>'
         )
 
     context_card = f"""\
@@ -737,6 +1037,7 @@ def format_report_email(
       <p style="margin:12px 0 6px;font-size:14px;font-weight:700;color:#0369a1;">
         &#128681; Injury Report</p>
       {inj_rows}
+      {('<p style="margin:12px 0 6px;font-size:14px;font-weight:700;color:#0369a1;">&#127780; Park Weather</p>' + weather_rows) if weather_rows else ""}
       <p style="margin:10px 0 0;font-size:11px;color:#64748b;">
         Generated {ts} &nbsp;&#8226;&nbsp; Always check PP app for last-minute line changes before placing</p>
     </td>
@@ -848,9 +1149,10 @@ def format_report_email(
       </tr>
     </table>
     <p style="margin:10px 0 0;font-size:11px;color:#9ca3af;line-height:1.6;">
-      Confidence % = estimated hit probability based on L5 hit rate, average vs line,
-      season trend, minutes, and injury status. Not a guarantee. Always verify lines
-      in the PP app — lines can move up to tip-off.
+      Confidence % = estimated hit probability based on: L5 hit rate, average vs line,
+      season trend, minutes trend, injury status, opponent defensive ranking, Vegas
+      book line comparison, MLB weather/wind conditions, and lineup confirmation.
+      Not a guarantee. Always verify lines in the PP app — lines can move up to tip-off.
     </p>
   </td></tr>
 </table>""")
@@ -991,6 +1293,40 @@ def run_now(games: list[dict], sport: str = "NBA"):
         _log(f"[{sport}] Stats module unavailable — aborting")
         return
 
+    # ── Context data fetches (all non-fatal) ─────────────────────────────────
+
+    # Vegas odds context
+    vegas_totals: list = []
+    try:
+        from data.vegas_odds import get_game_totals
+        vegas_totals = get_game_totals(sport)
+        _log(f"[vegas] {len(vegas_totals)} game totals fetched")
+    except Exception as e:
+        _log(f"[vegas] Failed (non-fatal): {e}")
+
+    # Weather context (MLB only)
+    weather_map: dict = {}
+    if sport == "MLB":
+        try:
+            from data.mlb_weather import get_park_weather
+            for game in games:
+                home_name = game.get("home_full", game.get("home_team", ""))
+                w = get_park_weather(home_name)
+                if w:
+                    weather_map[game.get("home_team", "")] = w
+            _log(f"[weather] {len(weather_map)} park weather fetched")
+        except Exception as e:
+            _log(f"[weather] Failed (non-fatal): {e}")
+
+    # Lineups
+    lineup_data: dict = {}
+    try:
+        from data.lineups import get_all_lineups
+        lineup_data = get_all_lineups(sport)
+        _log(f"[lineups] Loaded lineup data")
+    except Exception as e:
+        _log(f"[lineups] Failed (non-fatal): {e}")
+
     # 4. Score picks
     _log(f"[{sport}] Scoring {len(projections)} projections...")
     all_picks = score_all_picks(
@@ -998,6 +1334,11 @@ def run_now(games: list[dict], sport: str = "NBA"):
         injury_report,
         stats_fn=stats_fn,
         skip_combined=cfg.get("skip_combined", False),
+        sport=sport,
+        vegas_totals=vegas_totals,
+        weather_map=weather_map,
+        lineup_data=lineup_data,
+        games_list=games,
     )
     _log(f"[{sport}] {len(all_picks)} picks above {int(MIN_PICK_PROB*100)}% threshold")
 
@@ -1005,14 +1346,13 @@ def run_now(games: list[dict], sport: str = "NBA"):
         _log(f"[{sport}] No qualifying picks — skipping email")
         return
 
-    # Log picks to hit tracker (NBA only)
-    if sport == "NBA":
-        try:
-            from hit_tracker import log_picks
-            game_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            log_picks(all_picks, game_date)
-        except Exception as e:
-            _log(f"[hit_tracker] log_picks error (non-fatal): {e}")
+    # Log picks to hit tracker (all sports)
+    try:
+        from hit_tracker import log_picks
+        game_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        log_picks(all_picks, game_date)
+    except Exception as e:
+        _log(f"[hit_tracker] log_picks error (non-fatal): {e}")
 
     # 5. Build parlays
     parlays = build_parlays(all_picks)
