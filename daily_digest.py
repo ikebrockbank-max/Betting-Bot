@@ -233,8 +233,8 @@ def _collect_sport_picks(sport: str, cfg: dict) -> tuple[list, list, list]:
         _log(f"[digest/{sport}] Stats module unavailable")
         return games, [], []
 
-    # Cap projections to avoid multi-minute scoring on cold cache
-    # Dedupe to unique (player, stat_type) pairs first, then take top 80
+    # Cap projections to avoid multi-minute scoring
+    # Dedupe to unique (player, stat_type) pairs first, then take top 25
     seen_keys: set = set()
     deduped = []
     for p in projs:
@@ -242,7 +242,7 @@ def _collect_sport_picks(sport: str, cfg: dict) -> tuple[list, list, list]:
         if k not in seen_keys:
             seen_keys.add(k)
             deduped.append(p)
-    projs = deduped[:80]
+    projs = deduped[:25]
     _log(f"[digest/{sport}] Scoring {len(projs)} unique projections (capped)")
 
     try:
@@ -341,7 +341,10 @@ def run():
             push_body = f"Best 2-pick: {legs} ({int(best_2_global['combined']*100)}%)"
 
         send_push(push_body, title=f"PP Digest: {date_display}")
-        send_email(subject, html, plain)
+        sent_ok = send_email(subject, html, plain)
+        if not sent_ok:
+            _log(f"[digest] Email FAILED to send — check Gmail credentials")
+            return False
         _log(f"[digest] Sent: {subject}")
     except Exception as e:
         _log(f"[digest] Send error: {e}")
