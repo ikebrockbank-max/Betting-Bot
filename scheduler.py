@@ -22,6 +22,7 @@ INTERNAL_ARB_INTERVAL_MIN  = int(os.getenv("INTERNAL_ARB_INTERVAL_MIN",  "15")) 
 INJURY_POLL_INTERVAL_SEC   = int(os.getenv("INJURY_POLL_INTERVAL_SEC",   "120")) # injury check (seconds)
 PARLAY_SCAN_INTERVAL_MIN   = int(os.getenv("PARLAY_SCAN_INTERVAL_MIN",   "30"))  # PP parlay builder
 PP_REPORT_INTERVAL_MIN     = int(os.getenv("PP_REPORT_INTERVAL_MIN",     "30"))  # pre-game PP parlay report
+DAILY_DIGEST_HOUR_UTC      = int(os.getenv("DAILY_DIGEST_HOUR_UTC",      "15"))  # daily digest hour (UTC)
 
 
 def log(msg: str):
@@ -44,7 +45,9 @@ def main():
     last_injury_check  = 0.0
     last_parlay_scan   = 0.0
     last_pp_report     = 0.0
+    last_daily_digest  = ""     # date string "YYYY-MM-DD" of last digest
     injury_seen: dict  = {}     # in-memory dedup across iterations
+    pp_injury_seen: dict = {}   # in-memory dedup for PP injury alerts
 
     while True:
         # ── PP / ParlayPlay / Underdog / consensus scan (every 15 min) ───────
@@ -117,6 +120,16 @@ def main():
             except Exception:
                 log(f"ERROR during injury check:\n{traceback.format_exc()}")
 
+        # ── PP injury alert (every INJURY_POLL_INTERVAL_SEC seconds) ──────────
+        now = time.time()
+        if now - last_injury_check >= INJURY_POLL_INTERVAL_SEC:
+            try:
+                import pp_injury_alert
+                importlib.reload(pp_injury_alert)
+                pp_injury_seen = pp_injury_alert.run_once(pp_injury_seen)
+            except Exception:
+                log(f"ERROR during PP injury check:\n{traceback.format_exc()}")
+
         # ── PP parlay builder (every PARLAY_SCAN_INTERVAL_MIN minutes) ────────
         now = time.time()
         if now - last_parlay_scan >= PARLAY_SCAN_INTERVAL_MIN * 60:
@@ -138,6 +151,18 @@ def main():
                 last_pp_report = time.time()
             except Exception:
                 log(f"ERROR during PP pre-game report:\n{traceback.format_exc()}")
+
+        # ── Daily digest — once per day at DAILY_DIGEST_HOUR_UTC ─────────────
+        now_dt = datetime.now(UTC)
+        today  = now_dt.strftime("%Y-%m-%d")
+        if now_dt.hour >= DAILY_DIGEST_HOUR_UTC and last_daily_digest != today:
+            try:
+                import daily_digest
+                importlib.reload(daily_digest)
+                daily_digest.run()
+                last_daily_digest = today
+            except Exception:
+                log(f"ERROR during daily digest:\n{traceback.format_exc()}")
 
         log(f"Sleeping {SCAN_INTERVAL_MIN}m until next scan...")
         time.sleep(SCAN_INTERVAL_MIN * 60)

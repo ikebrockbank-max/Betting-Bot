@@ -116,6 +116,26 @@ def run():
         _log(f"ERROR fetching projections: {e}")
         return
 
+    # ── Line movement check ───────────────────────────────────────────────────
+    try:
+        from scanner_line_movement import check_line_movements
+        # Build a simple list of {player, stat_type/stat, line} for the movement checker
+        lm_projs = [
+            {"player": p.get("player_name", p.get("player", "")),
+             "stat_type": p.get("stat_type", p.get("stat", "")),
+             "line": p.get("line_score", p.get("line", 0))}
+            for p in projections
+            if p.get("player_name") or p.get("player")
+        ]
+        movers = check_line_movements(lm_projs)
+        if movers:
+            _log(f"📈 {len(movers)} line movement(s) detected:")
+            for m in movers[:5]:
+                arrow = "↑" if m["direction"] == "UP" else "↓"
+                _log(f"  {arrow} {m['player']} {m['stat']}: {m['old_line']} → {m['new_line']}")
+    except Exception as e:
+        _log(f"  Line movement check error (non-fatal): {e}")
+
     groups, _ = _group_lines(projections, players, HOURS_AHEAD)
 
     static_bugs    = _find_bugs(groups)

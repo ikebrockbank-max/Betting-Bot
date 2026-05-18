@@ -1000,6 +1000,14 @@ def run_now(games: list[dict]):
         _log("[report] No qualifying picks — skipping email")
         return
 
+    # Log picks to hit tracker
+    try:
+        from hit_tracker import log_picks
+        game_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        log_picks(all_picks, game_date)
+    except Exception as e:
+        _log(f"[hit_tracker] log_picks error (non-fatal): {e}")
+
     # 4. Build parlays
     parlays = build_parlays(all_picks)
     _log(f"[parlays] {len(parlays)} parlay combos (top EV: {parlays[0]['ev']:.2f})" if parlays else "[parlays] None found")
@@ -1025,6 +1033,13 @@ def run(force: bool = False):
 
     force=True: send for ALL upcoming games regardless of timing (for manual runs).
     """
+    # Resolve yesterday's picks at the start of each run
+    try:
+        from hit_tracker import resolve_yesterday_picks
+        resolve_yesterday_picks()
+    except Exception as e:
+        _log(f"[hit_tracker] resolve error (non-fatal): {e}")
+
     games = get_todays_games()
     if not games:
         _log("[report] No NBA games today")
