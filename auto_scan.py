@@ -11,6 +11,7 @@ Cloud loop:     python3 scheduler.py   (runs this every SCAN_INTERVAL_MIN minute
 """
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, UTC
@@ -229,25 +230,26 @@ def run():
             else:
                 _log(f"  🔥 {b['player']} {b['stat']}: {b['action']}")
 
-    # ── Underdog scan ─────────────────────────────────────────────────────────
+    # ── Underdog scan — disabled (UNDERDOG_SCAN=true to re-enable) ───────────
     new_ud = []
-    try:
-        from scanner_underdog import _detect_bugs as _ud_detect
-        from scanner_underdog import _load_seen as _ud_load_seen
-        from scanner_underdog import _save_seen as _ud_save_seen
-        from scanner_underdog import _bug_key   as _ud_bug_key
-        from data.underdog import get_grouped_lines as _get_ud_lines
-        _log("🐶 Running Underdog scan...")
-        ud_grouped, _ = _get_ud_lines()
-        ud_bugs = _ud_detect(ud_grouped)
-        seen_ud = _ud_load_seen()
-        new_ud  = [b for b in ud_bugs if _ud_bug_key(b) not in seen_ud]
-        for b in new_ud:
-            seen_ud.add(_ud_bug_key(b))
-        _ud_save_seen(seen_ud)
-        _log(f"  Underdog: {len(new_ud)} new bug(s) of {len(ud_bugs)} total")
-    except Exception as e:
-        _log(f"  Underdog scan error (non-fatal): {e}")
+    if os.getenv("UNDERDOG_SCAN", "").lower() == "true":
+        try:
+            from scanner_underdog import _detect_bugs as _ud_detect
+            from scanner_underdog import _load_seen as _ud_load_seen
+            from scanner_underdog import _save_seen as _ud_save_seen
+            from scanner_underdog import _bug_key   as _ud_bug_key
+            from data.underdog import get_grouped_lines as _get_ud_lines
+            _log("🐶 Running Underdog scan...")
+            ud_grouped, _ = _get_ud_lines()
+            ud_bugs = _ud_detect(ud_grouped)
+            seen_ud = _ud_load_seen()
+            new_ud  = [b for b in ud_bugs if _ud_bug_key(b) not in seen_ud]
+            for b in new_ud:
+                seen_ud.add(_ud_bug_key(b))
+            _ud_save_seen(seen_ud)
+            _log(f"  Underdog: {len(new_ud)} new bug(s) of {len(ud_bugs)} total")
+        except Exception as e:
+            _log(f"  Underdog scan error (non-fatal): {e}")
 
     total_new = len(new_bugs) + len(new_flash) + len(new_promos) + len(new_consensus) + len(new_plp) + len(new_ud)
 
