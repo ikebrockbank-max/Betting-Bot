@@ -28,22 +28,34 @@ def _send_via_gmail(to: str, subject: str, html_body: str, plain_body: str = "")
     """Send a multipart HTML+plain email via Gmail SMTP."""
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
         return False
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"]    = GMAIL_USER
-        msg["To"]      = to
-        # Plain text fallback first, then HTML (email clients prefer the last part)
-        if plain_body:
-            msg.attach(MIMEText(plain_body, "plain", "utf-8"))
-        msg.attach(MIMEText(html_body, "html", "utf-8"))
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            smtp.sendmail(GMAIL_USER, to, msg.as_string())
-        return True
-    except Exception as e:
-        print(f"[notify] Gmail send failed: {e}")
-        return False
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = GMAIL_USER
+    msg["To"]      = to
+    if plain_body:
+        msg.attach(MIMEText(plain_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    # Try port 465 (SMTP_SSL) first, fall back to port 587 (STARTTLS)
+    # Railway and some cloud hosts block 465 but allow 587
+    for attempt, use_ssl, port in [(1, True, 465), (2, False, 587)]:
+        try:
+            if use_ssl:
+                with smtplib.SMTP_SSL("smtp.gmail.com", port) as smtp:
+                    smtp.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+                    smtp.sendmail(GMAIL_USER, to, msg.as_string())
+            else:
+                with smtplib.SMTP("smtp.gmail.com", port) as smtp:
+                    smtp.ehlo()
+                    smtp.starttls()
+                    smtp.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+                    smtp.sendmail(GMAIL_USER, to, msg.as_string())
+            return True
+        except Exception as e:
+            print(f"[notify] Gmail port {port} failed: {e}")
+
+    return False
 
 
 def send_email(subject: str, html_body: str, plain_body: str = "") -> bool:

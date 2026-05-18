@@ -233,6 +233,18 @@ def _collect_sport_picks(sport: str, cfg: dict) -> tuple[list, list, list]:
         _log(f"[digest/{sport}] Stats module unavailable")
         return games, [], []
 
+    # Cap projections to avoid multi-minute scoring on cold cache
+    # Dedupe to unique (player, stat_type) pairs first, then take top 80
+    seen_keys: set = set()
+    deduped = []
+    for p in projs:
+        k = (p.get("player", ""), p.get("stat_type", ""))
+        if k not in seen_keys:
+            seen_keys.add(k)
+            deduped.append(p)
+    projs = deduped[:80]
+    _log(f"[digest/{sport}] Scoring {len(projs)} unique projections (capped)")
+
     try:
         picks = score_all_picks(
             projs,

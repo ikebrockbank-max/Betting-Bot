@@ -1369,8 +1369,11 @@ def run_now(games: list[dict], sport: str = "NBA"):
 
     emoji = cfg.get("emoji", "🏀")
     send_push(push_body, title=f"{emoji} {sport} PP Report: {games[0]['name']}")
-    send_email(subject, html, plain)
-    _log(f"[{sport}] Email sent: {subject}")
+    sent_ok = send_email(subject, html, plain)
+    if sent_ok:
+        _log(f"[{sport}] Email sent: {subject}")
+    else:
+        _log(f"[{sport}] Email FAILED to send: {subject}")
 
 
 def run(force: bool = False):
