@@ -68,7 +68,8 @@ def get_nba_projections(tonight_only: bool = True) -> list[dict]:
             try:
                 start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
                 now = datetime.now(timezone.utc)
-                if start > now + timedelta(hours=12) or start < now - timedelta(hours=1):
+                # 20-hour window captures afternoon/evening games from early-morning scans
+                if start > now + timedelta(hours=20) or start < now - timedelta(hours=3):
                     continue
             except (ValueError, TypeError):
                 continue

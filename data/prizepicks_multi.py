@@ -83,7 +83,9 @@ def get_projections(league_id: int, tonight_only: bool = True) -> list[dict]:
             start_str = attrs.get("start_time", "")
             try:
                 start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-                if start > now + timedelta(hours=12) or start < now - timedelta(hours=1):
+                # 20-hour forward window so early-morning checks (5am UTC) still
+                # capture afternoon/evening games; 3-hour back window for in-progress.
+                if start > now + timedelta(hours=20) or start < now - timedelta(hours=3):
                     continue
             except (ValueError, TypeError):
                 continue

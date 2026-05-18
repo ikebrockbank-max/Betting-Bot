@@ -184,6 +184,13 @@ def get_player_stats(
     all_vals = list(reversed(all_vals))
 
     n = len(all_vals)
+
+    # Quality gate: skip platoon/backup players with too few appearances.
+    # For batters we require at least 15 games; for pitchers at least 5 starts.
+    min_games = 5 if group == "pitching" else 15
+    if n < min_games:
+        return None
+
     n5  = min(5, n)
     n10 = min(10, n)
 
