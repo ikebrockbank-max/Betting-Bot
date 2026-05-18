@@ -1,9 +1,10 @@
 """
 pp_playoff_report.py — Pre-game PrizePicks parlay report.
 
-Fetches current PP lines, injury reports, and playoff/recent stats for every
-active player in tonight's NBA games. Scores each pick algorithmically, builds
-optimal 2-pick and 3-pick parlay combos, and emails a detailed breakdown.
+Fetches current PP lines, injury reports, and recent stats for every active
+player in tonight's NBA, WNBA, and MLB games. Scores each pick
+algorithmically, builds optimal 2-pick and 3-pick parlay combos, and emails
+a detailed breakdown per sport.
 
 Triggered by scheduler.py (PLAYOFF_REPORT_INTERVAL_MIN=30).
 The report fires once per game when tip-off is 2.5–3.5 hours away.
@@ -24,29 +25,55 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from data.nba_stats import get_player_stats
-from data.injuries import get_injury_report
-from notify import send_push, send_email
+from data.nba_stats  import get_player_stats as nba_get_stats
+from data.injuries   import get_injury_report
+from notify          import send_push, send_email
+
+# ── Sport Configuration ────────────────────────────────────────────────────────
+
+SPORT_CONFIG = {
+    "NBA": {
+        "league_id": 7,
+        "espn_url":  "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
+        "emoji":     "🏀",
+        "analyze_stats": {
+            "Points", "Rebounds", "Assists", "3-PT Made", "Turnovers",
+            "Blocks", "Steals", "Pts+Reb+Ast", "Pts+Reb", "Pts+Ast",
+        },
+        "skip_combined": False,
+    },
+    "WNBA": {
+        "league_id": 3,
+        "espn_url":  "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard",
+        "emoji":     "🏀",
+        "analyze_stats": {
+            "Points", "Rebounds", "Assists", "3-PT Made",
+            "Pts+Rebs", "Pts+Asts", "Pts+Rebs+Asts", "Rebs+Asts",
+        },
+        "skip_combined": False,
+    },
+    "MLB": {
+        "league_id": 2,
+        "espn_url":  "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard",
+        "emoji":     "⚾",
+        "analyze_stats": {
+            "Hits", "Total Bases", "Runs", "RBIs", "Home Runs", "Stolen Bases",
+            "Hitter Strikeouts", "Pitcher Strikeouts", "Singles", "Doubles",
+            "Walks", "Hits+Runs+RBIs",
+        },
+        "skip_combined": True,
+    },
+}
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 SENT_LOG_PATH = Path("logs/.sent_pp_reports.json")
 LOG_PATH      = Path("logs/pp_playoff_reports.log")
 
-PP_API_URL    = "https://partner-api.prizepicks.com/projections"
-PP_HEADERS    = {
-    "User-Agent": "PrizePicks/2.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
-    "Accept":     "application/json",
-}
-
-ESPN_URL     = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 ESPN_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
-# Stat types to pull from PP and score
-ANALYZE_STATS = {
-    "Points", "Rebounds", "Assists", "3-PT Made", "Turnovers",
-    "Blocks", "Steals", "Pts+Reb+Ast", "Pts+Reb", "Pts+Ast",
-}
+# Keep ANALYZE_STATS as NBA default for backward compat
+ANALYZE_STATS = SPORT_CONFIG["NBA"]["analyze_stats"]
 
 # PrizePicks payouts and break-even rates
 PP_PAYOUTS   = {2: 3.0, 3: 5.0, 4: 10.0}
@@ -75,17 +102,17 @@ def _log(msg: str):
 
 # ── Data Fetchers ──────────────────────────────────────────────────────────────
 
-def get_todays_games() -> list[dict]:
+def get_tonight_games(espn_url: str, window_min: int = 24 * 60) -> list[dict]:
     """
-    Fetch today's NBA games from ESPN scoreboard.
+    Fetch tonight's games from any ESPN scoreboard URL.
     Returns upcoming games sorted by start time.
     """
     try:
-        resp = requests.get(ESPN_URL, headers=ESPN_HEADERS, timeout=10)
+        resp = requests.get(espn_url, headers=ESPN_HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        _log(f"[espn] Schedule fetch failed: {e}")
+        _log(f"[espn] Schedule fetch failed ({espn_url}): {e}")
         return []
 
     games = []
@@ -115,8 +142,8 @@ def get_todays_games() -> list[dict]:
 
         mins_until = (start - now).total_seconds() / 60
 
-        # Skip games that already started (more than 5 min ago) or >24h away
-        if mins_until < -5 or mins_until > 24 * 60:
+        # Skip games already started (>5 min ago) or beyond window
+        if mins_until < -5 or mins_until > window_min:
             continue
 
         games.append({
@@ -136,98 +163,29 @@ def get_todays_games() -> list[dict]:
     return games
 
 
-def fetch_pp_projections() -> list[dict]:
+def get_todays_games() -> list[dict]:
+    """Backward-compatible: fetch tonight's NBA games."""
+    return get_tonight_games(SPORT_CONFIG["NBA"]["espn_url"])
+
+
+def fetch_pp_projections(
+    league_id: int = 7,
+    analyze_stats: set | None = None,
+) -> list[dict]:
     """
-    Fetch all standard, pre-game, single-stat NBA projections from PrizePicks.
-    Returns only stats in ANALYZE_STATS. Broader than data/prizepicks.py —
-    no Odds API mapping filter.
+    Fetch standard, pre-game, single-stat projections from PrizePicks for any league.
+    analyze_stats: set of stat_type strings to include (None = include all).
     """
-    params = {"league_id": 7, "per_page": 500, "single_stat": "true"}
-    for attempt in range(4):
-        try:
-            resp = requests.get(PP_API_URL, headers=PP_HEADERS, params=params, timeout=15)
-            if resp.status_code == 429:
-                wait = 20 * (attempt + 1)
-                _log(f"[pp] Rate limited — waiting {wait}s (attempt {attempt+1}/4)")
-                time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            break
-        except requests.exceptions.HTTPError as e:
-            if attempt < 3:
-                time.sleep(15)
-                continue
-            _log(f"[pp] Fetch failed after retries: {e}")
-            return []
-        except Exception as e:
-            _log(f"[pp] Fetch failed: {e}")
-            return []
-    else:
-        _log("[pp] All retry attempts exhausted")
-        return []
+    from data.prizepicks_multi import get_projections
+    if analyze_stats is None:
+        analyze_stats = ANALYZE_STATS
 
-    # Build player name lookup
-    players = {}
-    for item in data.get("included", []):
-        if item.get("type") == "new_player":
-            attrs = item.get("attributes", {})
-            players[item["id"]] = {
-                "name": attrs.get("name", ""),
-                "team": attrs.get("team", ""),
-            }
+    projections = get_projections(league_id, tonight_only=True)
 
-    projections = []
-    now = datetime.now(timezone.utc)
-
-    for proj in data.get("data", []):
-        if proj.get("type") != "projection":
-            continue
-        attrs = proj.get("attributes", {})
-
-        if attrs.get("projection_type", "Single Stat") != "Single Stat":
-            continue
-        if attrs.get("status") != "pre_game":
-            continue
-        if attrs.get("odds_type") != "standard":
-            continue
-
-        stat_type = attrs.get("stat_type", "")
-        if stat_type not in ANALYZE_STATS:
-            continue
-
-        # Only tonight's games (within 12 hours)
-        start_str = attrs.get("start_time", "")
-        try:
-            start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-            if start > now + timedelta(hours=12) or start < now - timedelta(hours=1):
-                continue
-        except (ValueError, TypeError):
-            continue
-
-        try:
-            line = float(attrs["line_score"])
-        except (ValueError, KeyError):
-            continue
-
-        player_id   = proj.get("relationships", {}).get("new_player", {}).get("data", {}).get("id", "")
-        player_info = players.get(player_id, {})
-        player_name = player_info.get("name", "")
-
-        if not player_name or "+" in player_name:
-            continue
-
-        projections.append({
-            "player":     player_name,
-            "team":       player_info.get("team", ""),
-            "stat_type":  stat_type,
-            "line":       line,
-            "game_id":    attrs.get("game_id", ""),
-            "start_time": start,
-        })
-
-    _log(f"[pp] {len(projections)} projections fetched across {len(ANALYZE_STATS)} stat types")
-    return projections
+    # Filter to recognized stat types
+    filtered = [p for p in projections if p["stat_type"] in analyze_stats]
+    _log(f"[pp] league={league_id}: {len(filtered)} projections (of {len(projections)} total)")
+    return filtered
 
 
 # ── Pick Scoring ───────────────────────────────────────────────────────────────
@@ -356,12 +314,21 @@ def _score_pick(
 def score_all_picks(
     projections: list[dict],
     injury_report: dict,
+    stats_fn=None,
+    skip_combined: bool = False,
 ) -> list[dict]:
     """
     Score every PP projection. Returns list of pick dicts with prob and reason.
     Keeps the best direction (OVER or UNDER) per (player, stat_type).
     Skips picks for injured (OUT/Doubtful) players.
+
+    stats_fn: callable(player_name, stat_type) -> dict | None
+              Defaults to nba_get_stats.
+    skip_combined: if True, skip stat types containing '+' (MLB single-stat only).
     """
+    if stats_fn is None:
+        stats_fn = nba_get_stats
+
     picks = []
     seen  = set()
 
@@ -374,9 +341,12 @@ def score_all_picks(
         if key in seen:
             continue
 
-        # Fetch stats (playoff first, then regular season fallback)
+        if skip_combined and "+" in stat_type:
+            continue
+
+        # Fetch stats
         try:
-            stats = get_player_stats(player, stat_type)
+            stats = stats_fn(player, stat_type)
         except Exception:
             stats = None
 
@@ -412,7 +382,7 @@ def score_all_picks(
             picks.append(best)
             seen.add(key)
 
-        time.sleep(0.35)   # gentle on NBA stats API
+        time.sleep(0.35)
 
     picks.sort(key=lambda p: p["prob"], reverse=True)
     return picks
@@ -695,11 +665,13 @@ def format_report_email(
     parlays:   list[dict],
     all_picks: list[dict],
     games:     list[dict],
+    sport:     str = "NBA",
 ) -> tuple[str, str, str]:
     """Build the full pre-game parlay report email. Returns (subject, html, plain)."""
 
     now      = datetime.now(timezone.utc)
     ts       = now.strftime("%b %d %Y %H:%M UTC")
+    emoji    = SPORT_CONFIG.get(sport, {}).get("emoji", "🏀")
 
     # Game header info
     if games:
@@ -717,12 +689,12 @@ def format_report_email(
         else:
             game_header = f"{len(games)} Games Tonight"
 
-        subject = f"🏀 PP Parlay Report: {game_header} — {tip_str}"
+        subject = f"{emoji} PP Parlay Report: {sport} — {game_header} — {tip_str}"
     else:
         tip_str     = "Tonight"
         mins_str    = ""
-        game_header = "NBA Tonight"
-        subject     = "🏀 PP Parlay Report — NBA Tonight"
+        game_header = f"{sport} Tonight"
+        subject     = f"{emoji} PP Parlay Report — {sport} Tonight"
 
     # ── Injury context ────────────────────────────────────────────────────────
     out_players  = [p for p in all_picks if p.get("injury") and p["injury"].get("disqualified")]
@@ -969,69 +941,104 @@ def _save_sent(sent: dict):
 
 # ── Entry Points ───────────────────────────────────────────────────────────────
 
-def run_now(games: list[dict]):
-    """Run the full analysis and send the email for the given game list."""
+def _get_stats_fn(sport: str):
+    """Return the stats function for the given sport."""
+    if sport == "WNBA":
+        try:
+            from data.wnba_stats import get_player_stats as fn
+            return fn
+        except Exception:
+            return None
+    elif sport == "MLB":
+        try:
+            from data.mlb_stats import get_player_stats as fn
+            return fn
+        except Exception:
+            return None
+    return nba_get_stats
+
+
+def run_now(games: list[dict], sport: str = "NBA"):
+    """Run the full analysis and send the email for the given game list and sport."""
     if not games:
-        _log("[report] No games provided — nothing to do")
+        _log(f"[{sport}] No games provided — nothing to do")
         return
 
-    _log(f"[report] Analysing {len(games)} game(s): " + ", ".join(g['name'] for g in games))
+    cfg = SPORT_CONFIG.get(sport, SPORT_CONFIG["NBA"])
+    _log(f"[{sport}] Analysing {len(games)} game(s): " + ", ".join(g['name'] for g in games))
 
     # 1. PP lines
-    projections = fetch_pp_projections()
+    projections = fetch_pp_projections(
+        league_id=cfg["league_id"],
+        analyze_stats=cfg["analyze_stats"],
+    )
     if not projections:
-        _log("[report] No PP projections found — aborting")
+        _log(f"[{sport}] No PP projections found — aborting")
         return
 
-    # 2. Injuries
-    try:
-        injury_report = get_injury_report()
-        _log(f"[injuries] {len(injury_report)} players on report")
-    except Exception as e:
-        _log(f"[injuries] Failed: {e}")
-        injury_report = {}
+    # 2. Injuries (NBA only; skip gracefully for others)
+    injury_report: dict = {}
+    if sport == "NBA":
+        try:
+            injury_report = get_injury_report()
+            _log(f"[injuries] {len(injury_report)} players on report")
+        except Exception as e:
+            _log(f"[injuries] Failed: {e}")
 
-    # 3. Score picks
-    _log(f"[picks] Scoring {len(projections)} projections (fetching NBA stats — ~30s)...")
-    all_picks = score_all_picks(projections, injury_report)
-    _log(f"[picks] {len(all_picks)} picks above {int(MIN_PICK_PROB*100)}% threshold")
+    # 3. Stats function
+    stats_fn = _get_stats_fn(sport)
+    if stats_fn is None:
+        _log(f"[{sport}] Stats module unavailable — aborting")
+        return
+
+    # 4. Score picks
+    _log(f"[{sport}] Scoring {len(projections)} projections...")
+    all_picks = score_all_picks(
+        projections,
+        injury_report,
+        stats_fn=stats_fn,
+        skip_combined=cfg.get("skip_combined", False),
+    )
+    _log(f"[{sport}] {len(all_picks)} picks above {int(MIN_PICK_PROB*100)}% threshold")
 
     if not all_picks:
-        _log("[report] No qualifying picks — skipping email")
+        _log(f"[{sport}] No qualifying picks — skipping email")
         return
 
-    # Log picks to hit tracker
-    try:
-        from hit_tracker import log_picks
-        game_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        log_picks(all_picks, game_date)
-    except Exception as e:
-        _log(f"[hit_tracker] log_picks error (non-fatal): {e}")
+    # Log picks to hit tracker (NBA only)
+    if sport == "NBA":
+        try:
+            from hit_tracker import log_picks
+            game_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            log_picks(all_picks, game_date)
+        except Exception as e:
+            _log(f"[hit_tracker] log_picks error (non-fatal): {e}")
 
-    # 4. Build parlays
+    # 5. Build parlays
     parlays = build_parlays(all_picks)
-    _log(f"[parlays] {len(parlays)} parlay combos (top EV: {parlays[0]['ev']:.2f})" if parlays else "[parlays] None found")
+    _log(f"[{sport}] {len(parlays)} parlay combos" + (f" (top EV: {parlays[0]['ev']:.2f})" if parlays else ""))
 
-    # 5. Format & send
-    subject, html, plain = format_report_email(parlays, all_picks, games)
+    # 6. Format & send
+    subject, html, plain = format_report_email(parlays, all_picks, games, sport=sport)
 
     push_lines = []
     for p in parlays[:2]:
         legs = " + ".join(f"{pk['player'].split()[-1]} {pk['direction']}" for pk in p["picks"])
         push_lines.append(f"{p['size']}-pick ({p['payout']}x): {legs} | {int(p['combined']*100)}%")
-    push_body = " || ".join(push_lines) if push_lines else "No strong parlays tonight"
+    push_body = " || ".join(push_lines) if push_lines else f"No strong {sport} parlays tonight"
 
-    send_push(push_body, title=f"🏀 PP Report: {games[0]['name']}")
+    emoji = cfg.get("emoji", "🏀")
+    send_push(push_body, title=f"{emoji} {sport} PP Report: {games[0]['name']}")
     send_email(subject, html, plain)
-    _log(f"[report] Email sent: {subject}")
+    _log(f"[{sport}] Email sent: {subject}")
 
 
 def run(force: bool = False):
     """
-    Check today's NBA games and fire the pre-game report ~3 hours before tip-off.
-    Called by scheduler.py every 30 minutes.
+    Check today's games across NBA, WNBA, and MLB. Fire pre-game reports
+    ~3 hours before tip-off. Called by scheduler.py every 30 minutes.
 
-    force=True: send for ALL upcoming games regardless of timing (for manual runs).
+    force=True: send for ALL upcoming games regardless of timing.
     """
     # Resolve yesterday's picks at the start of each run
     try:
@@ -1040,39 +1047,58 @@ def run(force: bool = False):
     except Exception as e:
         _log(f"[hit_tracker] resolve error (non-fatal): {e}")
 
-    games = get_todays_games()
-    if not games:
-        _log("[report] No NBA games today")
-        return
-
     sent  = _load_sent()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    any_games = False
 
-    for game in games:
-        mins    = game["mins_until"]
-        gid     = game["game_id"] or game["name"]
-        key     = f"{today}|{gid}"
+    for sport, cfg in SPORT_CONFIG.items():
+        try:
+            games = get_tonight_games(cfg["espn_url"])
+        except Exception as e:
+            _log(f"[{sport}] Schedule fetch error: {e}")
+            continue
 
-        in_window    = REPORT_WINDOW_MIN[0] <= mins <= REPORT_WINDOW_MIN[1]
-        already_sent = key in sent
+        if not games:
+            _log(f"[{sport}] No games today")
+            continue
 
-        if force or (in_window and not already_sent):
-            _log(f"[report] {game['name']} tips in {mins:.0f}m — running report")
-            run_now([game])
-            sent[key] = datetime.now(timezone.utc).isoformat()
-            _save_sent(sent)
-        else:
-            status = "already sent" if already_sent else f"{mins:.0f}m away (outside window)"
-            _log(f"[report] {game['name']} — {status}")
+        any_games = True
+
+        for game in games:
+            mins = game["mins_until"]
+            gid  = game["game_id"] or game["name"]
+            key  = f"{sport}|{today}|{gid}"
+
+            in_window    = REPORT_WINDOW_MIN[0] <= mins <= REPORT_WINDOW_MIN[1]
+            already_sent = key in sent
+
+            if force or (in_window and not already_sent):
+                _log(f"[{sport}] {game['name']} tips in {mins:.0f}m — running report")
+                try:
+                    run_now([game], sport=sport)
+                except Exception as e:
+                    _log(f"[{sport}] run_now error: {e}")
+                sent[key] = datetime.now(timezone.utc).isoformat()
+                _save_sent(sent)
+            else:
+                status = "already sent" if already_sent else f"{mins:.0f}m away (outside window)"
+                _log(f"[{sport}] {game['name']} — {status}")
+
+    if not any_games:
+        _log("[report] No games found across any sport today")
 
 
 if __name__ == "__main__":
     force = "--force" in sys.argv
     if force:
-        games = get_todays_games()
-        if games:
-            run_now(games)
-        else:
-            print("No NBA games found today.")
+        for sport, cfg in SPORT_CONFIG.items():
+            games = get_tonight_games(cfg["espn_url"])
+            if games:
+                try:
+                    run_now(games, sport=sport)
+                except Exception as e:
+                    print(f"[{sport}] Error: {e}")
+            else:
+                print(f"No {sport} games found today.")
     else:
         run()

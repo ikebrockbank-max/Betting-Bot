@@ -185,10 +185,78 @@ def _build_email(
     return subject, html, "\n".join(plain_lines)
 
 
+def _collect_sport_picks(sport: str, cfg: dict) -> tuple[list, list, list]:
+    """
+    Collect (games, picks, parlays) for one sport.
+    Returns empty lists on any error so the digest can continue.
+    """
+    from pp_playoff_report import (
+        fetch_pp_projections,
+        score_all_picks,
+        build_parlays,
+        get_tonight_games,
+        _get_stats_fn,
+    )
+
+    try:
+        games = get_tonight_games(cfg["espn_url"])
+        if not games:
+            return [], [], []
+        _log(f"[digest/{sport}] {len(games)} game(s) tonight")
+    except Exception as e:
+        _log(f"[digest/{sport}] Game fetch error: {e}")
+        return [], [], []
+
+    try:
+        projs = fetch_pp_projections(
+            league_id=cfg["league_id"],
+            analyze_stats=cfg["analyze_stats"],
+        )
+        if not projs:
+            _log(f"[digest/{sport}] No projections")
+            return games, [], []
+        _log(f"[digest/{sport}] {len(projs)} projections")
+    except Exception as e:
+        _log(f"[digest/{sport}] PP fetch error: {e}")
+        return games, [], []
+
+    injury_report: dict = {}
+    if sport == "NBA":
+        try:
+            from data.injuries import get_injury_report
+            injury_report = get_injury_report()
+        except Exception:
+            pass
+
+    stats_fn = _get_stats_fn(sport)
+    if stats_fn is None:
+        _log(f"[digest/{sport}] Stats module unavailable")
+        return games, [], []
+
+    try:
+        picks = score_all_picks(
+            projs,
+            injury_report,
+            stats_fn=stats_fn,
+            skip_combined=cfg.get("skip_combined", False),
+        )
+        _log(f"[digest/{sport}] {len(picks)} qualifying picks")
+    except Exception as e:
+        _log(f"[digest/{sport}] Score error: {e}")
+        return games, [], []
+
+    try:
+        parlays = build_parlays(picks)
+    except Exception:
+        parlays = []
+
+    return games, picks, parlays
+
+
 def run():
     """
-    Run the daily digest. Called by scheduler.py once per day when
-    current UTC hour >= DAILY_DIGEST_HOUR_UTC.
+    Run the daily digest across NBA, WNBA, and MLB.
+    Called by scheduler.py once per day when current UTC hour >= DAILY_DIGEST_HOUR_UTC.
     """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -199,71 +267,45 @@ def run():
 
     _log(f"[digest] Running daily digest for {today}")
 
-    # Import pp_playoff_report functions
     try:
-        from pp_playoff_report import (
-            fetch_pp_projections,
-            score_all_picks,
-            build_parlays,
-            get_todays_games,
-        )
-        from data.injuries import get_injury_report
+        from pp_playoff_report import SPORT_CONFIG
     except Exception as e:
         _log(f"[digest] Import error: {e}")
         return
 
-    # Check for games tonight
-    try:
-        games = get_todays_games()
-        if not games:
-            _log("[digest] No NBA games today — skipping digest")
-            return
-        _log(f"[digest] {len(games)} game(s) tonight")
-    except Exception as e:
-        _log(f"[digest] Game fetch error: {e}")
+    # Collect picks across all sports
+    all_picks_combined: list = []
+    all_games_combined: list = []
+    best_2_global = None
+    best_3_global = None
+
+    for sport, cfg in SPORT_CONFIG.items():
+        try:
+            games, picks, parlays = _collect_sport_picks(sport, cfg)
+        except Exception as e:
+            _log(f"[digest/{sport}] Unexpected error: {e}")
+            continue
+
+        if picks:
+            # Tag each pick with sport for the email
+            for p in picks:
+                p["sport"] = sport
+            all_picks_combined.extend(picks)
+            all_games_combined.extend(games)
+            # Keep best overall parlay per size from highest-prob sport
+            b2 = next((p for p in parlays if p["size"] == 2), None)
+            b3 = next((p for p in parlays if p["size"] == 3), None)
+            if b2 and (best_2_global is None or b2["ev"] > best_2_global["ev"]):
+                best_2_global = b2
+            if b3 and (best_3_global is None or b3["ev"] > best_3_global["ev"]):
+                best_3_global = b3
+
+    if not all_picks_combined:
+        _log("[digest] No qualifying picks across any sport — skipping digest")
         return
 
-    # Fetch projections
-    try:
-        projs = fetch_pp_projections()
-        if not projs:
-            _log("[digest] No PP projections — skipping digest")
-            return
-        _log(f"[digest] {len(projs)} projections fetched")
-    except Exception as e:
-        _log(f"[digest] PP fetch error: {e}")
-        return
-
-    # Injuries
-    try:
-        injury_report = get_injury_report()
-        _log(f"[digest] {len(injury_report)} players on injury report")
-    except Exception as e:
-        _log(f"[digest] Injury fetch error (non-fatal): {e}")
-        injury_report = {}
-
-    # Score picks
-    try:
-        all_picks = score_all_picks(projs, injury_report)
-        _log(f"[digest] {len(all_picks)} qualifying picks scored")
-    except Exception as e:
-        _log(f"[digest] Score error: {e}")
-        return
-
-    if not all_picks:
-        _log("[digest] No qualifying picks tonight — skipping digest")
-        return
-
-    # Build parlays
-    try:
-        parlays = build_parlays(all_picks)
-        _log(f"[digest] {len(parlays)} parlays built")
-    except Exception as e:
-        _log(f"[digest] Parlay error (non-fatal): {e}")
-        parlays = []
-
-    best_2 = next((p for p in parlays if p["size"] == 2), None)
-    best_3 = next((p for p in parlays if p["size"] == 3), None)
+    # Sort combined picks by prob
+    all_picks_combined.sort(key=lambda p: p["prob"], reverse=True)
 
     # Get hit tracker summary
     try:
@@ -276,12 +318,15 @@ def run():
     # Format and send
     try:
         date_display = datetime.now(timezone.utc).strftime("%B %d, %Y")
-        subject, html, plain = _build_email(all_picks, best_2, best_3, summary, date_display, games)
+        subject, html, plain = _build_email(
+            all_picks_combined, best_2_global, best_3_global,
+            summary, date_display, all_games_combined,
+        )
 
-        push_body = f"{len(all_picks)} picks tonight"
-        if best_2:
-            legs = " + ".join(p["player"].split()[-1] for p in best_2["picks"])
-            push_body = f"Best 2-pick: {legs} ({int(best_2['combined']*100)}%)"
+        push_body = f"{len(all_picks_combined)} picks tonight (NBA/WNBA/MLB)"
+        if best_2_global:
+            legs = " + ".join(p["player"].split()[-1] for p in best_2_global["picks"])
+            push_body = f"Best 2-pick: {legs} ({int(best_2_global['combined']*100)}%)"
 
         send_push(push_body, title=f"PP Digest: {date_display}")
         send_email(subject, html, plain)
