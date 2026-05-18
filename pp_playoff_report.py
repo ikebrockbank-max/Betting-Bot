@@ -18,6 +18,7 @@ import itertools
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -477,6 +478,33 @@ def score_all_picks(
     except Exception:
         pass
 
+    # ── Pre-fetch all player stats in parallel (massive speedup vs sequential) ──
+    unique_pairs: list[tuple[str, str]] = []
+    seen_keys: set = set()
+    for proj in projections:
+        player    = proj["player"]
+        stat_type = proj["stat_type"]
+        key       = (player.lower(), stat_type)
+        if key not in seen_keys and not (skip_combined and "+" in stat_type):
+            seen_keys.add(key)
+            unique_pairs.append((player, stat_type))
+
+    stats_cache: dict[tuple[str, str], dict | None] = {}
+
+    def _fetch_one(pair):
+        player, stat_type = pair
+        try:
+            return pair, stats_fn(player, stat_type)
+        except Exception:
+            return pair, None
+
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        futures = {executor.submit(_fetch_one, p): p for p in unique_pairs}
+        for future in as_completed(futures):
+            pair, result = future.result()
+            stats_cache[pair] = result
+    # ── End parallel pre-fetch ─────────────────────────────────────────────────
+
     picks = []
     seen  = set()
 
@@ -493,11 +521,8 @@ def score_all_picks(
         if skip_combined and "+" in stat_type:
             continue
 
-        # Fetch stats
-        try:
-            stats = stats_fn(player, stat_type)
-        except Exception:
-            stats = None
+        # Fetch stats (from pre-fetched cache)
+        stats = stats_cache.get((player, stat_type))
 
         if not stats:
             continue
