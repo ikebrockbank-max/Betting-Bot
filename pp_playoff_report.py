@@ -1388,9 +1388,20 @@ def run_now(games: list[dict], sport: str = "NBA"):
 
     push_lines = []
     for p in parlays[:2]:
-        legs = " + ".join(f"{pk['player'].split()[-1]} {pk['direction']}" for pk in p["picks"])
+        legs = " + ".join(
+            f"{pk['player'].split()[-1]} {pk['direction']} {pk['line']} {pk['stat_type']}"
+            for pk in p["picks"]
+        )
         push_lines.append(f"{p['size']}-pick ({p['payout']}x): {legs} | {int(p['combined']*100)}%")
-    push_body = " || ".join(push_lines) if push_lines else f"No strong {sport} parlays tonight"
+
+    # Also list top individual picks with full details
+    top_picks_lines = [
+        f"{pk['player']} {pk['direction']} {pk['line']} {pk['stat_type']} ({int(pk['prob']*100)}%)"
+        for pk in sorted(all_picks, key=lambda x: x['prob'], reverse=True)[:5]
+    ]
+    push_body = "\n".join(top_picks_lines)
+    if push_lines:
+        push_body += "\n\n" + "\n".join(push_lines)
 
     emoji = cfg.get("emoji", "🏀")
     send_push(push_body, title=f"{emoji} {sport} PP Report: {games[0]['name']}")

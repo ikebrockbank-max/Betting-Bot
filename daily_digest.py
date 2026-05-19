@@ -335,10 +335,26 @@ def run():
             summary, date_display, all_games_combined,
         )
 
-        push_body = f"{len(all_picks_combined)} picks tonight (NBA/WNBA/MLB)"
+        # Build push body: top 5 picks with full line details
+        top5 = all_picks_combined[:5]
+        pick_lines = [
+            f"{p['player']} {p['direction']} {p['line']} {p['stat_type']} ({int(p['prob']*100)}%)"
+            for p in top5
+        ]
+        push_body = "\n".join(pick_lines)
+
         if best_2_global:
-            legs = " + ".join(p["player"].split()[-1] for p in best_2_global["picks"])
-            push_body = f"Best 2-pick: {legs} ({int(best_2_global['combined']*100)}%)"
+            legs = " + ".join(
+                f"{pk['player'].split()[-1]} {pk['direction']} {pk['line']} {pk['stat_type']}"
+                for pk in best_2_global["picks"]
+            )
+            push_body += f"\n\nBest 2-pick: {legs} | {int(best_2_global['combined']*100)}%"
+        if best_3_global:
+            legs = " + ".join(
+                f"{pk['player'].split()[-1]} {pk['direction']} {pk['line']} {pk['stat_type']}"
+                for pk in best_3_global["picks"]
+            )
+            push_body += f"\nBest 3-pick: {legs} | {int(best_3_global['combined']*100)}%"
 
         send_push(push_body, title=f"PP Digest: {date_display}")
         sent_ok = send_email(subject, html, plain)
