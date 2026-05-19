@@ -1443,6 +1443,11 @@ def run(force: bool = False):
 
         any_games = True
 
+        # Collect all unsent in-window games and run as ONE combined report
+        # (avoids spam when multiple games tip around the same time, e.g. 15 MLB games)
+        in_window_games = []
+        in_window_keys  = []
+
         for game in games:
             mins = game["mins_until"]
             gid  = game["game_id"] or game["name"]
@@ -1452,16 +1457,23 @@ def run(force: bool = False):
             already_sent = key in sent
 
             if force or (in_window and not already_sent):
-                _log(f"[{sport}] {game['name']} tips in {mins:.0f}m — running report")
-                try:
-                    run_now([game], sport=sport)
-                except Exception as e:
-                    _log(f"[{sport}] run_now error: {e}")
-                sent[key] = datetime.now(timezone.utc).isoformat()
-                _save_sent(sent)
+                in_window_games.append(game)
+                in_window_keys.append(key)
+                _log(f"[{sport}] {game['name']} tips in {mins:.0f}m — queued for report")
             else:
                 status = "already sent" if already_sent else f"{mins:.0f}m away (outside window)"
                 _log(f"[{sport}] {game['name']} — {status}")
+
+        if in_window_games:
+            _log(f"[{sport}] Running combined report for {len(in_window_games)} game(s)")
+            try:
+                run_now(in_window_games, sport=sport)
+            except Exception as e:
+                _log(f"[{sport}] run_now error: {e}")
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for key in in_window_keys:
+                sent[key] = now_iso
+            _save_sent(sent)
 
     if not any_games:
         _log("[report] No games found across any sport today")

@@ -230,6 +230,9 @@ def _fetch_mlb_defense() -> dict:
         if not team_id or not team_name:
             continue
 
+        team_data: dict = {}
+
+        # Pitching stats (for hitter prop opponent context)
         try:
             sr = requests.get(
                 f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats",
@@ -237,21 +240,35 @@ def _fetch_mlb_defense() -> dict:
                 timeout=10,
             )
             sr.raise_for_status()
-            stats_data = sr.json()
-
-            splits = stats_data.get("stats", [{}])[0].get("splits", [{}])
-            if not splits:
-                continue
-
-            stat = splits[0].get("stat", {})
-            teams[team_name] = {
-                "era":                     float(stat.get("era", 99)),
-                "whip":                    float(stat.get("whip", 99)),
-                "strikeoutsPerNineInnings": float(stat.get("strikeoutsPer9Inn", 0)),
-            }
-            time.sleep(0.1)
+            splits = sr.json().get("stats", [{}])[0].get("splits", [{}])
+            if splits:
+                stat = splits[0].get("stat", {})
+                team_data["era"]  = float(stat.get("era",  99))
+                team_data["whip"] = float(stat.get("whip", 99))
+                team_data["pitching_k9"] = float(stat.get("strikeoutsPer9Inn", 0))
         except Exception:
-            continue
+            pass
+
+        # Batting stats (for pitcher K prop opponent context — how often does this lineup K?)
+        try:
+            br = requests.get(
+                f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats",
+                params={"stats": "season", "group": "hitting", "season": 2026},
+                timeout=10,
+            )
+            br.raise_for_status()
+            splits = br.json().get("stats", [{}])[0].get("splits", [{}])
+            if splits:
+                stat = splits[0].get("stat", {})
+                ks   = int(stat.get("strikeOuts", 0))
+                pas  = int(stat.get("plateAppearances", 1))
+                team_data["batting_k_pct"] = round(ks / max(pas, 1), 4)
+        except Exception:
+            pass
+
+        if team_data:
+            teams[team_name] = team_data
+        time.sleep(0.1)
 
     cache_data = {"ts": time.time(), "teams": teams}
     _save_cache(MLB_CACHE_PATH, {"data": cache_data})
@@ -429,36 +446,89 @@ def _get_mlb_context(opponent_team: str, stat_type: str, direction: str) -> dict
     if not team_stats:
         return None
 
-    # For batter stats, use ERA (lower ERA = better pitching = harder for batters)
-    # For pitcher stats (Pitcher Strikeouts), higher K/9 = pitchers strike out more = easier OVER
     if stat_type in MLB_PITCHER_STATS:
-        stat_key        = "strikeoutsPerNineInnings"
-        lower_is_better = False   # higher K/9 means more strikeouts available
-        unit            = "K/9"
+        # For pitcher K props: use opposing lineup's BATTING strikeout rate
+        # High batting K% = lineup strikes out a lot = easier for pitcher to get Ks
+        stat_key        = "batting_k_pct"
+        lower_is_better = False  # higher K% = easier for pitcher OVER
+        unit            = "batter K%"
+
+        stat_value = team_stats.get(stat_key)
+        if stat_value is None:
+            return None
+
+        stat_map = {name: {stat_key: stats.get(stat_key, 0)} for name, stats in defense.items()}
+        ranks    = _rank_teams(stat_map, stat_key, lower_is_better=False)
+        rank     = ranks.get(team_key, 0)
+        n_teams  = len(ranks)
+        # Flip label logic: high K% lineup = easy matchup for pitcher = "Weak" contact
+        label    = _get_defense_label(n_teams - rank + 1, n_teams)  # invert rank for label
+        adj      = _get_prob_adjustment(rank, n_teams, direction)
+
+        return {
+            "rank":            rank,
+            "n_teams":         n_teams,
+            "label":           label,
+            "prob_adjustment": adj,
+            "stat_value":      round(float(stat_value), 4),
+            "description":     (
+                f"Opposing lineup K% {stat_value:.1%} "
+                f"({_ordinal(rank)} most Ks in MLB — "
+                f"{'easy' if rank >= n_teams * 0.6 else 'tough'} matchup for pitcher Ks)"
+            ),
+        }
+
     else:
+        # For hitter props: use opposing team's ERA + tonight's probable pitcher
         stat_key        = "era"
         lower_is_better = True
-        unit            = "ERA"
 
-    stat_value = team_stats.get(stat_key)
-    if stat_value is None:
-        return None
+        stat_value = team_stats.get(stat_key)
+        if stat_value is None:
+            return None
 
-    stat_map = {name: {stat_key: stats.get(stat_key, 0)} for name, stats in defense.items()}
-    ranks    = _rank_teams(stat_map, stat_key, lower_is_better=lower_is_better)
-    rank     = ranks.get(team_key, 0)
-    n_teams  = len(ranks)
-    label    = _get_defense_label(rank, n_teams)
-    adj      = _get_prob_adjustment(rank, n_teams, direction)
+        stat_map = {name: {"era": stats.get("era", 99)} for name, stats in defense.items()}
+        ranks    = _rank_teams(stat_map, "era", lower_is_better=True)
+        rank     = ranks.get(team_key, 0)
+        n_teams  = len(ranks)
+        label    = _get_defense_label(rank, n_teams)
+        adj      = _get_prob_adjustment(rank, n_teams, direction)
 
-    return {
-        "rank":            rank,
-        "n_teams":         n_teams,
-        "label":           label,
-        "prob_adjustment": adj,
-        "stat_value":      round(float(stat_value), 2),
-        "description":     f"{unit} {stat_value:.2f} ({_ordinal(rank)} {'best' if lower_is_better else 'highest'} in MLB)",
-    }
+        desc = f"Team ERA {stat_value:.2f} ({_ordinal(rank)} best pitching staff)"
+
+        # Also check tonight's probable starter for extra context
+        try:
+            from data.lineups import get_mlb_probable_pitcher
+            pitcher_name, pitcher_era = get_mlb_probable_pitcher(opponent_team) or (None, None)
+            if pitcher_name and pitcher_era is not None:
+                pitcher_era = float(pitcher_era)
+                desc += f" • Starter: {pitcher_name} ({pitcher_era:.2f} ERA)"
+                # Additional adjustment for elite/terrible starters
+                if pitcher_era < 2.50:
+                    extra = -0.03 if direction.upper() == "OVER" else 0.03
+                    adj   = round(adj + extra, 3)
+                    desc += " — ace, tough night for hitters"
+                elif pitcher_era < 3.50:
+                    extra = -0.02 if direction.upper() == "OVER" else 0.02
+                    adj   = round(adj + extra, 3)
+                elif pitcher_era > 6.00:
+                    extra = 0.03 if direction.upper() == "OVER" else -0.03
+                    adj   = round(adj + extra, 3)
+                    desc += " — struggling starter, good for hitters"
+                elif pitcher_era > 5.00:
+                    extra = 0.02 if direction.upper() == "OVER" else -0.02
+                    adj   = round(adj + extra, 3)
+        except Exception:
+            pass
+
+        return {
+            "rank":            rank,
+            "n_teams":         n_teams,
+            "label":           label,
+            "prob_adjustment": round(adj, 3),
+            "stat_value":      round(float(stat_value), 2),
+            "description":     desc,
+        }
 
 
 def _ordinal(n: int) -> str:
