@@ -157,6 +157,13 @@ def _build_advanced_note(p: dict) -> str:
         cv = p.get("role_stability")
         if cv is not None and cv < 0.4:
             notes.append("⚠️ volatile mins")
+        # Usage trend — show when meaningfully elevated or depressed
+        usage_trend = p.get("usage_trend")
+        usage_adj   = p.get("usage_adj", 1.0)
+        if usage_trend is not None and abs(usage_trend) >= 0.10:
+            pct = int(usage_trend * 100)
+            icon = "📈" if usage_trend > 0 else "📉"
+            notes.append(f"{icon} Usage {pct:+d}% (shots/min vs season)")
         # Injury impact — show method so it's clear if boost is evidence-based
         inj_note = p.get("injury_note", "")
         inj_src  = p.get("injury_adjustment_source", "")

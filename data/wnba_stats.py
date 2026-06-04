@@ -561,6 +561,49 @@ def get_player_stats(
     # Blend: 60% recent rate, 40% season rate
     blended_rate   = l5_per_min * 0.60 + stat_per_min * 0.40
 
+    # ── Usage / opportunity modeling ──────────────────────────────────────────
+    # Minutes × per-minute rate misses role changes within the same playing time.
+    # A player with 35 min / 22 FGA has a very different opportunity than
+    # 35 min / 10 FGA. We track FGA/min (shot volume proxy) and blend the
+    # recent usage trend into the stat rate the same way we blend minute rates.
+    #
+    # For non-scoring stats (Rebounds, Assists, etc.) FGA/min is a proxy for
+    # general involvement: higher FGA = primary option = more opportunity overall.
+
+    fga_vals = [g.get("fga", 0) for g in full_games if g.get("fga", 0) > 0]
+    usage_fga_per_game = round(sum(fga_vals) / len(fga_vals), 1) if fga_vals else None
+    usage_fga_per_min  = None
+    usage_trend        = None   # positive = getting more shots recently
+    usage_adj          = 1.0    # multiplier on blended_rate
+
+    if fga_vals and fm:
+        n_fga = len(fga_vals)
+        # Season usage rate (FGA per minute played)
+        season_fga_per_min = sum(fga_vals) / sum(fm[:n_fga]) if sum(fm[:n_fga]) > 0 else None
+        usage_fga_per_min  = round(season_fga_per_min, 4) if season_fga_per_min else None
+
+        # L5 usage rate — recent shot volume per minute
+        n5_fga = min(5, len(fga_vals))
+        l5_fga_per_min = (sum(fga_vals[:n5_fga]) / sum(fm[:n5_fga])
+                          if sum(fm[:n5_fga]) > 0 else None)
+
+        if season_fga_per_min and l5_fga_per_min and season_fga_per_min > 0:
+            usage_trend = round((l5_fga_per_min - season_fga_per_min) / season_fga_per_min, 3)
+            # Blend recent vs season usage: same 60/40 split as minutes rate
+            blended_fga_per_min = l5_fga_per_min * 0.60 + season_fga_per_min * 0.40
+            usage_ratio = blended_fga_per_min / season_fga_per_min
+
+            # Usage adjustment on stat rate — cap to ±20% to prevent extremes.
+            # For scoring stats (Points), FGA/min is a direct driver.
+            # For other stats, we apply a softer version (50% weight).
+            if stat_type in ("Points", "Pts+Rebs", "Pts+Asts", "Pts+Rebs+Asts"):
+                usage_adj = min(1.20, max(0.80, usage_ratio))
+            else:
+                # Softer for non-scoring: usage is correlated but not causal
+                usage_adj = min(1.10, max(0.90, 0.5 + usage_ratio * 0.5))
+
+            blended_rate = round(blended_rate * usage_adj, 4)
+
     # ── Injury impact: check if key teammates are OUT ─────────────────────────
     # When a high-minute teammate is OUT, our player absorbs a share of their minutes.
     # This is the single largest source of unmodeled edge.
@@ -584,6 +627,7 @@ def get_player_stats(
                 sport           = "WNBA",
                 player_avg_min  = season_min,
                 player_game_log = full_games,   # pass actual game log for WOWY + priced-in detection
+                role_change     = role_change,  # pass for overlap protection
             )
             if injury_impact.get("has_impact"):
                 boost = injury_impact["minutes_boost"]
@@ -618,11 +662,6 @@ def get_player_stats(
         # Fallback: ±1 stdev of minutes × blended rate
         proj_low  = round(blended_rate * max(0, projected_minutes - min_std_dev), 2)
         proj_high = round(blended_rate * (projected_minutes + min_std_dev), 2)
-
-    # Usage proxy: avg FGA per game (field goal attempts = shot volume)
-    fga_vals = [g.get("fga", 0) for g in full_games if g.get("fga", 0) > 0]
-    usage_fga_per_game  = round(sum(fga_vals) / len(fga_vals), 1) if fga_vals else None
-    usage_fga_per_min   = round(sum(fga_vals) / sum(fm[:len(fga_vals)]), 3) if fga_vals and fm else None
 
     # ── Rest days ──────────────────────────────────────────────────────────────
     rest_days = None
@@ -666,9 +705,11 @@ def get_player_stats(
         "projected_stat":     projected_stat,
         "proj_low":           proj_low,
         "proj_high":          proj_high,
-        # Usage
+        # Usage / opportunity model
         "usage_fga_per_game": usage_fga_per_game,
         "usage_fga_per_min":  usage_fga_per_min,
+        "usage_trend":        usage_trend,    # % change in FGA/min: L5 vs season (+ = more shots recently)
+        "usage_adj":          usage_adj,      # multiplier applied to blended_rate
         # Per-36
         "season_per36":       round(season_per36, 2),
         "l5_per36":           round(l5_per36, 2),

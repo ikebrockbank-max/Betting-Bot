@@ -533,6 +533,8 @@ def _get_wnba_stats(player_name: str, stat_type: str, line: float,
         computed["proj_high"]          = result.get("proj_high")
         computed["stat_per_min"]       = result.get("stat_per_min")
         computed["usage_fga_per_game"] = result.get("usage_fga_per_game")
+        computed["usage_trend"]        = result.get("usage_trend")
+        computed["usage_adj"]          = result.get("usage_adj", 1.0)
         computed["rest_days"]          = result.get("rest_days")
         computed["season_per36"]       = result.get("season_per36")
         computed["l5_per36"]           = result.get("l5_per36")
@@ -990,13 +992,20 @@ def score_pick(stats: dict, pick: dict) -> dict:
     n_games    = stats.get("n_games", MIN_GAMES)
     data_conf  = min(1.0, n_games / 10)
 
-    # WNBA: role stability factor — volatile minutes = lower confidence
+    # WNBA: role stability + usage trend into opportunity score
     if sport == "WNBA":
-        role_stab = stats.get("role_stability", 0.5)
-        # Blend role stability into opportunity score baseline
-        # role_stability of 1.0 = perfectly stable (32,33,31,34)
-        # role_stability of 0.0 = wildly variable (17,34,22,38)
-        opp_score_base = 0.5 + (role_stab - 0.5) * 0.4   # scales 0.3–0.7
+        role_stab  = stats.get("role_stability", 0.5)
+        usage_adj  = stats.get("usage_adj", 1.0)
+        usage_trend = stats.get("usage_trend")
+
+        # Role stability: volatile minutes = lower baseline confidence
+        stability_base = 0.5 + (role_stab - 0.5) * 0.4   # scales 0.3–0.7
+
+        # Usage trend: getting more shots recently = higher opportunity
+        # usage_adj > 1.0 means player is more involved than season average
+        usage_opp = min(0.15, max(-0.15, (usage_adj - 1.0) * 0.75))  # ±0.15 range
+
+        opp_score_base = min(0.85, max(0.15, stability_base + usage_opp))
     else:
         opp_score_base = 1.0
 
@@ -1314,6 +1323,8 @@ def score_pick(stats: dict, pick: dict) -> dict:
     result["injury_note"]              = stats.get("injury_note", "")
     result["injury_impact"]            = stats.get("injury_impact", {})
     result["injury_adjustment_source"] = stats.get("injury_impact", {}).get("injury_adjustment_source", "")
+    result["usage_trend"]              = stats.get("usage_trend")
+    result["usage_adj"]                = stats.get("usage_adj", 1.0)
     result["cal_note"]                 = cal_note
 
     return result

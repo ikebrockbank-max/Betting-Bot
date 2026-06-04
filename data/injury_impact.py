@@ -191,14 +191,39 @@ def _count_games_missed(out_player_dates: set[str], target_game_log: list) -> in
 
 # ── WOWY (With/Without You) ───────────────────────────────────────────────────
 
+def _wowy_confidence(n_without: int) -> float:
+    """
+    Scale the WOWY adjustment by sample size of the 'without' bucket.
+
+    A 3-game 'without' sample deserves much less trust than a 15-game sample —
+    3 games can easily be noise; 15 games is a pattern.
+
+    n_without   trust
+    1-2         0.25  (very low — almost certainly noise)
+    3-5         0.55  (moderate — apply with caution)
+    6-10        0.80  (good — meaningful evidence)
+    11+         1.00  (strong — treat as reliable)
+    """
+    if n_without <= 2:
+        return 0.25
+    if n_without <= 5:
+        return 0.55
+    if n_without <= 10:
+        return 0.80
+    return 1.00
+
+
 def _compute_wowy(target_game_log: list, out_player_dates: set[str]) -> dict | None:
     """
     Split the target player's game log into games WITH and WITHOUT the teammate.
     Requires at least 3 games in each bucket to be reliable.
 
     Returns:
-        {with_avg_min, without_avg_min, diff_min, n_with, n_without}
+        {with_avg_min, without_avg_min, diff_min, n_with, n_without,
+         confidence, adjusted_diff}
     or None if insufficient data.
+
+    adjusted_diff = diff_min * confidence — the sample-size-weighted boost to apply.
     """
     if not target_game_log or not out_player_dates:
         return None
@@ -218,24 +243,29 @@ def _compute_wowy(target_game_log: list, out_player_dates: set[str]) -> dict | N
 
     with_avg    = sum(with_mins)    / len(with_mins)
     without_avg = sum(without_mins) / len(without_mins)
+    diff        = round(without_avg - with_avg, 1)  # positive = plays more without
+    confidence  = _wowy_confidence(len(without_mins))
 
     return {
         "with_avg_min":    round(with_avg,    1),
         "without_avg_min": round(without_avg, 1),
-        "diff_min":        round(without_avg - with_avg, 1),  # positive = plays more without
+        "diff_min":        diff,
         "n_with":          len(with_mins),
         "n_without":       len(without_mins),
+        "confidence":      confidence,
+        "adjusted_diff":   round(diff * confidence, 1),  # what we actually apply
     }
 
 
 # ── Main API ──────────────────────────────────────────────────────────────────
 
 def get_team_injury_impact(
-    player_name:    str,
-    player_team:    str,
-    sport:          str,
-    player_avg_min: float = 0.0,
+    player_name:     str,
+    player_team:     str,
+    sport:           str,
+    player_avg_min:  float = 0.0,
     player_game_log: list  = None,   # target player's full game log for WOWY
+    role_change:     str   = None,   # from wnba_stats: "starter_spike"|"minutes_up"|etc.
 ) -> dict:
     """
     Compute the minutes boost for a player when teammates are OUT.
@@ -330,8 +360,8 @@ def get_team_injury_impact(
         wowy = _compute_wowy(player_game_log or [], out_dates)
 
         if wowy and wowy["diff_min"] > 0:
-            # Historical evidence: player plays MORE minutes without this teammate
-            boost  = wowy["diff_min"]
+            # Use sample-size-adjusted diff (not raw diff — small samples get scaled down)
+            boost  = wowy["adjusted_diff"]
             method = "WOWY"
             wowy_detail = wowy
         else:
@@ -340,6 +370,18 @@ def get_team_injury_impact(
             boost  = out_avg_min * share
             method = "Redistribution estimate"
             wowy_detail = None
+
+        # ── Role change overlap check ─────────────────────────────────────────
+        # If the target player's minutes have already trended up recently (role_change
+        # == "starter_spike" or "minutes_up") AND this injury is very recent (≤2 games
+        # missed), the minute trend likely already captures the injury effect.
+        # Applying the full injury boost on top would double-count.
+        # Scale down to only the unpriced portion.
+        if role_change in ("starter_spike", "minutes_up") and games_missed <= 2:
+            # The recent trend embedded most of the injury effect.
+            # Keep only 30% of the boost — the portion not yet in the data.
+            boost  = round(boost * 0.30, 1)
+            method = method + " (partial — role change overlaps)"
 
         total_minutes_boost += boost
         methods_used.append(method)
