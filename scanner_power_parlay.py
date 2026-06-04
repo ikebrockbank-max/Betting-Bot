@@ -1282,6 +1282,55 @@ def score_pick(stats: dict, pick: dict) -> dict:
     except Exception:
         pass
 
+    # ── Probability distribution engine ──────────────────────────────────────────
+    # Model the stat as normally distributed around the projection.
+    # P(over line) = 1 − Φ((line − projection) / σ)
+    #
+    # σ sources (best → fallback):
+    #   1. Calibration MAE → σ ≈ MAE / 0.798  (for normal: MAE = σ√(2/π))
+    #   2. Player's own stat_std_dev from their game log
+    #   3. Half the proj_low/proj_high range
+    #
+    # For WNBA (where we have a real projected_stat), blend the distribution
+    # probability into confidence at 45% weight. Other sports keep their current
+    # composite scoring model unchanged.
+    p_over  = None
+    p_under = None
+    proj_stat_val = stats.get("projected_stat")
+    if proj_stat_val is not None and proj_stat_val > 0 and line > 0:
+        import math as _math
+        _std = None
+        # Source 1: calibration MAE
+        try:
+            from calibration_tracker import get_stat_mae as _gsmae
+            _mae = _gsmae(sport, stat_type, min_n=8)
+            if _mae and _mae > 0.3:
+                _std = _mae / 0.798   # MAE = σ · √(2/π) ≈ 0.798σ  →  σ = MAE/0.798
+        except Exception:
+            pass
+        # Source 2: player stat std dev
+        if not _std or _std < 0.5:
+            _std = stats.get("stat_std_dev") or 0.0
+        # Source 3: projection range half-width
+        if (_std or 0) < 0.5:
+            _pl, _ph = stats.get("proj_low"), stats.get("proj_high")
+            if _pl is not None and _ph is not None:
+                _std = max(0.5, (_ph - _pl) / 2.0)
+
+        if _std and _std > 0.3:
+            _z      = (line - proj_stat_val) / _std
+            _cdf    = 0.5 * (1 + _math.erf(_z / _math.sqrt(2)))
+            p_over  = round(max(0.01, min(0.99, 1.0 - _cdf)), 3)
+            p_under = round(max(0.01, min(0.99, _cdf)), 3)
+
+            # For WNBA: blend distribution probability into confidence score.
+            # We have a real per-minute projection here, so the normal model is
+            # meaningful. 55% composite + 45% distribution.
+            if sport == "WNBA":
+                _p_model = p_over if direction == "OVER" else p_under
+                if 0.05 < _p_model < 0.95:
+                    confidence = round(confidence * 0.55 + _p_model * 0.45, 3)
+
     result = {**pick, **stats}
     result["hit_score"]       = round(hit_score, 3)
     result["edge_score"]      = round(edge_score, 3)
@@ -1325,7 +1374,10 @@ def score_pick(stats: dict, pick: dict) -> dict:
     result["injury_adjustment_source"] = stats.get("injury_impact", {}).get("injury_adjustment_source", "")
     result["usage_trend"]              = stats.get("usage_trend")
     result["usage_adj"]                = stats.get("usage_adj", 1.0)
+    result["usage_confidence"]         = stats.get("usage_confidence", 1.0)
     result["cal_note"]                 = cal_note
+    result["p_over"]                   = p_over
+    result["p_under"]                  = p_under
 
     return result
 

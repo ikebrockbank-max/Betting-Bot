@@ -514,12 +514,18 @@ def get_player_stats(
     away_split = _split(away_games)
 
     # ── Opponent defensive context ─────────────────────────────────────────────
+    # Uses scoreboard-derived box-score averages: rebounds props get rebounds
+    # allowed, assists props get assists allowed, etc. — not points allowed for all.
     opp_def = {}
     if opp_team:
         try:
-            opp_def = _get_opp_def_stats(opp_team, stat_type)
+            from data.opponent_defense import get_wnba_opp_defense
+            opp_def = get_wnba_opp_defense(opp_team, stat_type)
         except Exception:
-            pass
+            try:
+                opp_def = _get_opp_def_stats(opp_team, stat_type)
+            except Exception:
+                pass
 
     # ── Minutes projection engine ──────────────────────────────────────────────
     import statistics as _stats
@@ -575,6 +581,7 @@ def get_player_stats(
     usage_fga_per_min  = None
     usage_trend        = None   # positive = getting more shots recently
     usage_adj          = 1.0    # multiplier on blended_rate
+    usage_confidence   = 1.0    # 1.0 = consistent recent usage; 0.30 = high-variance
 
     if fga_vals and fm:
         n_fga = len(fga_vals)
@@ -593,15 +600,31 @@ def get_player_stats(
             blended_fga_per_min = l5_fga_per_min * 0.60 + season_fga_per_min * 0.40
             usage_ratio = blended_fga_per_min / season_fga_per_min
 
-            # Usage adjustment on stat rate — cap to ±20% to prevent extremes.
-            # For scoring stats (Points), FGA/min is a direct driver.
-            # For other stats, we apply a softer version (50% weight).
+            # Raw usage adjustment (before consistency tempering)
             if stat_type in ("Points", "Pts+Rebs", "Pts+Asts", "Pts+Rebs+Asts"):
-                usage_adj = min(1.20, max(0.80, usage_ratio))
+                raw_usage_adj = min(1.20, max(0.80, usage_ratio))
             else:
                 # Softer for non-scoring: usage is correlated but not causal
-                usage_adj = min(1.10, max(0.90, 0.5 + usage_ratio * 0.5))
+                raw_usage_adj = min(1.10, max(0.90, 0.5 + usage_ratio * 0.5))
 
+            # ── Usage confidence: dampen noisy spikes ────────────────────────
+            # A consistent L5 (e.g. 12, 13, 11, 14, 12 FGA) earns full trust.
+            # A noisy L5 (e.g. 10, 19, 8, 20, 9 FGA) is likely variance —
+            # we dampen usage_adj toward 1.0 proportional to the CV.
+            # CV < 0.20 = consistent → 1.0 (full trust)
+            # CV = 0.40  → ~0.70 confidence
+            # CV ≥ 0.67  → 0.30 (floor — never fully ignore the signal)
+            usage_confidence = 1.0
+            l5_fga_raw = fga_vals[:n5_fga]
+            if len(l5_fga_raw) >= 2:
+                fga_mean = sum(l5_fga_raw) / len(l5_fga_raw)
+                if fga_mean > 0:
+                    fga_std  = _stats.stdev(l5_fga_raw)
+                    usage_cv = fga_std / fga_mean
+                    usage_confidence = max(0.30, min(1.0, 1.0 - usage_cv * 1.5))
+
+            # Temper: scale how far adj deviates from 1.0 by confidence
+            usage_adj = round(1.0 + (raw_usage_adj - 1.0) * usage_confidence, 4)
             blended_rate = round(blended_rate * usage_adj, 4)
 
     # ── Injury impact: check if key teammates are OUT ─────────────────────────
@@ -708,8 +731,9 @@ def get_player_stats(
         # Usage / opportunity model
         "usage_fga_per_game": usage_fga_per_game,
         "usage_fga_per_min":  usage_fga_per_min,
-        "usage_trend":        usage_trend,    # % change in FGA/min: L5 vs season (+ = more shots recently)
-        "usage_adj":          usage_adj,      # multiplier applied to blended_rate
+        "usage_trend":        usage_trend,       # % change in FGA/min: L5 vs season (+ = more shots recently)
+        "usage_adj":          usage_adj,          # tempered multiplier applied to blended_rate
+        "usage_confidence":   usage_confidence,  # 1.0=consistent spike, 0.30=high-variance signal
         # Per-36
         "season_per36":       round(season_per36, 2),
         "l5_per36":           round(l5_per36, 2),

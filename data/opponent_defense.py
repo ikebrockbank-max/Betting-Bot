@@ -22,6 +22,45 @@ MLB_CACHE_PATH  = Path("logs/.mlb_defense_cache.json")
 WNBA_CACHE_PATH = Path("logs/.wnba_defense_cache.json")
 CACHE_TTL       = 3600  # 1 hour
 
+# ── WNBA constants ─────────────────────────────────────────────────────────────
+
+ESPN_WNBA_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard"
+ESPN_WNBA_SUMMARY    = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary"
+ESPN_HDRS            = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+# ESPN box score stat name → our internal category key
+WNBA_BOX_STAT_MAP = {
+    "points":                   "Points",
+    "rebounds":                 "Rebounds",
+    "totalRebounds":            "Rebounds",
+    "assists":                  "Assists",
+    "threePointFieldGoalsMade": "3-PT Made",
+    "steals":                   "Steals",
+    "blocks":                   "Blocks",
+    "turnovers":                "Turnovers",
+    "totalTurnovers":           "Turnovers",
+}
+
+# WNBA 2025 season league averages — fallback context when a team isn't in data yet
+WNBA_LEAGUE_AVGS: dict[str, float] = {
+    "Points":    77.0,
+    "Rebounds":  32.5,
+    "Assists":   18.0,
+    "3-PT Made":  8.0,
+    "Steals":     6.5,
+    "Blocks":     3.2,
+    "Turnovers": 13.5,
+}
+
+# Combo stat → primary component for defense lookup
+WNBA_COMBO_PRIMARY: dict[str, str] = {
+    "Pts+Rebs":      "Points",
+    "Pts+Asts":      "Points",
+    "Pts+Rebs+Asts": "Points",
+    "Rebs+Asts":     "Rebounds",
+    "Stls+Blks":     "Steals",
+}
+
 NBA_HEADERS = {
     "User-Agent":          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Referer":             "https://www.nba.com/",
@@ -147,56 +186,108 @@ def _fetch_nba_defense() -> dict:
 
 def _fetch_wnba_defense() -> dict:
     """
-    Fetch WNBA team stats from ESPN.
-    Returns dict: {team_name: {pts_allowed, reb_allowed, ast_allowed}}
+    Build per-team WNBA defensive averages from ESPN game box scores.
+
+    Fetches the list of completed games from the ESPN scoreboard, then pulls
+    each game's box score summary. For each game between Team A and Team B:
+      - Team A's stats (pts, reb, ast…) = what Team B *allowed*
+      - Team B's stats = what Team A *allowed*
+
+    Returns {team_display_name: {Points: avg, Rebounds: avg, Assists: avg, …}}
+
+    Cached for CACHE_TTL seconds. First run: ~80 API calls (≈10 s).
+    Subsequent runs within TTL: instant from cache.
     """
     cache = _load_cache(WNBA_CACHE_PATH)
     if _cache_fresh(cache, "data"):
         return cache["data"]["teams"]
 
-    teams = {}
-
+    # ── 1. Fetch completed game event IDs ──────────────────────────────────────
     try:
-        # Get all WNBA teams
         resp = requests.get(
-            "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams",
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            ESPN_WNBA_SCOREBOARD,
+            params={"dates": "20260501-20261231", "limit": 300},
+            headers=ESPN_HDRS,
             timeout=15,
         )
         resp.raise_for_status()
-        team_list = resp.json().get("sports", [{}])[0].get("leagues", [{}])[0].get("teams", [])
+        events = resp.json().get("events", [])
     except Exception:
         return {}
 
-    for entry in team_list:
-        team_info = entry.get("team", {})
-        team_id   = team_info.get("id", "")
-        team_name = team_info.get("displayName", "")
-        if not team_id:
-            continue
+    completed_ids = [
+        str(ev.get("id", ""))
+        for ev in events
+        if ev.get("status", {}).get("type", {}).get("completed", False)
+        and ev.get("id", "")
+    ]
 
+    if not completed_ids:
+        return {}
+
+    # ── 2. Accumulate allowed stats per team from box scores ──────────────────
+    # allowed[team_name][stat_type] = [game1_val, game2_val, ...]
+    allowed: dict[str, dict[str, list[float]]] = {}
+
+    for event_id in completed_ids[-80:]:   # most recent 80 completed games
         try:
             sr = requests.get(
-                f"https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams/{team_id}/statistics",
-                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+                ESPN_WNBA_SUMMARY,
+                params={"event": event_id},
+                headers=ESPN_HDRS,
                 timeout=10,
             )
             sr.raise_for_status()
-            stats_data = sr.json()
-
-            # Parse stats categories
-            team_stats = {}
-            for cat in stats_data.get("results", []):
-                for stat in cat.get("stats", []):
-                    team_stats[stat.get("name", "")] = stat.get("value", 0)
-
-            teams[team_name] = team_stats
-            time.sleep(0.2)
+            box_teams = sr.json().get("boxscore", {}).get("teams", [])
         except Exception:
             continue
 
-    cache_data = {"ts": time.time(), "teams": teams}
-    _save_cache(WNBA_CACHE_PATH, {"data": cache_data})
+        if len(box_teams) < 2:
+            continue
+
+        # Parse each team's box-score stats
+        parsed: list[tuple[str, dict[str, float]]] = []
+        for bt in box_teams:
+            tname = bt.get("team", {}).get("displayName", "")
+            if not tname:
+                continue
+            stats: dict[str, float] = {}
+            for s in bt.get("statistics", []):
+                cat = WNBA_BOX_STAT_MAP.get(s.get("name", ""))
+                if cat and cat not in stats:  # first match wins per category
+                    try:
+                        stats[cat] = float(
+                            s.get("displayValue", "0").replace(",", "")
+                        )
+                    except (ValueError, TypeError):
+                        pass
+            if stats:
+                parsed.append((tname, stats))
+
+        if len(parsed) != 2:
+            continue
+
+        (t1, s1), (t2, s2) = parsed
+        # What t1 scored = what t2 allowed
+        for stat, val in s1.items():
+            allowed.setdefault(t2, {}).setdefault(stat, []).append(val)
+        # What t2 scored = what t1 allowed
+        for stat, val in s2.items():
+            allowed.setdefault(t1, {}).setdefault(stat, []).append(val)
+
+        time.sleep(0.12)   # light rate-limit respect
+
+    # ── 3. Average per team ────────────────────────────────────────────────────
+    teams: dict[str, dict[str, float]] = {
+        team: {
+            stat: round(sum(vals) / len(vals), 2)
+            for stat, vals in stat_lists.items()
+            if vals
+        }
+        for team, stat_lists in allowed.items()
+    }
+
+    _save_cache(WNBA_CACHE_PATH, {"data": {"ts": time.time(), "teams": teams}})
     return teams
 
 
@@ -406,26 +497,50 @@ def _get_nba_context(opponent_team: str, stat_type: str, direction: str) -> dict
 
 
 def _get_wnba_context(opponent_team: str, stat_type: str, direction: str) -> dict | None:
+    """
+    Return per-stat-type defensive context for a WNBA opponent.
+
+    Key fix vs. previous version: each stat type uses its own allowed average.
+    Rebounds props use rebounds allowed, assists props use assists allowed, etc.
+    Previously every stat used avgPointsAllowed — this made rebounds/assists
+    context meaningless.
+    """
     defense = _fetch_wnba_defense()
-    if not defense:
+
+    # Resolve combo stats to their primary defensive signal
+    lookup_stat = WNBA_COMBO_PRIMARY.get(stat_type, stat_type)
+    league_avg  = WNBA_LEAGUE_AVGS.get(lookup_stat)
+    if league_avg is None:
         return None
 
     team_key, team_stats = _find_team(defense, opponent_team)
-    if not team_stats:
+    if not team_stats or lookup_stat not in team_stats:
         return None
 
-    # Use points allowed as the primary signal for most stats
-    stat_key   = "avgPointsAllowed" if "Points" in stat_type or "Pts" in stat_type else "avgPointsAllowed"
-    stat_value = team_stats.get(stat_key)
-    if stat_value is None:
-        return None
+    stat_value = team_stats[lookup_stat]
 
-    stat_map = {name: {stat_key: stats.get(stat_key, 0)} for name, stats in defense.items()}
-    ranks    = _rank_teams(stat_map, stat_key, lower_is_better=True)
-    rank     = ranks.get(team_key, 0)
-    n_teams  = len(ranks)
-    label    = _get_defense_label(rank, n_teams)
-    adj      = _get_prob_adjustment(rank, n_teams, direction)
+    # Rank all teams that have data for this specific stat
+    stat_map = {
+        name: {lookup_stat: stats.get(lookup_stat, league_avg)}
+        for name, stats in defense.items()
+        if lookup_stat in stats
+    }
+    ranks   = _rank_teams(stat_map, lookup_stat, lower_is_better=True)
+    rank    = ranks.get(team_key, 0)
+    n_teams = len(ranks)
+    label   = _get_defense_label(rank, n_teams) if rank and n_teams else "Unknown"
+    adj     = _get_prob_adjustment(rank, n_teams, direction) if rank and n_teams else 0.0
+
+    stat_units = {
+        "Points":    "pts",
+        "Rebounds":  "reb",
+        "Assists":   "ast",
+        "3-PT Made": "3PM",
+        "Steals":    "stl",
+        "Blocks":    "blk",
+        "Turnovers": "tov",
+    }
+    unit = stat_units.get(lookup_stat, "per game")
 
     return {
         "rank":            rank,
@@ -433,8 +548,36 @@ def _get_wnba_context(opponent_team: str, stat_type: str, direction: str) -> dic
         "label":           label,
         "prob_adjustment": adj,
         "stat_value":      round(float(stat_value), 1),
-        "description":     f"Allows {stat_value:.1f} pts/game ({_ordinal(rank)} best defense)",
+        "league_avg":      round(league_avg, 1),
+        "description": (
+            f"Allows {stat_value:.1f} {unit}/game "
+            f"(lg avg {league_avg:.1f}, {_ordinal(rank)} best defense)"
+        ),
     }
+
+
+def get_wnba_opp_defense(opp_team: str, stat_type: str) -> dict:
+    """
+    Public helper used by wnba_stats.py to get {avg_allowed, league_avg, is_favorable}.
+    Bridges the scoreboard-based data to the format the scanner expects.
+    """
+    lookup_stat = WNBA_COMBO_PRIMARY.get(stat_type, stat_type)
+    league_avg  = WNBA_LEAGUE_AVGS.get(lookup_stat)
+    if not opp_team or not league_avg:
+        return {}
+    try:
+        defense = _fetch_wnba_defense()
+        _, team_stats = _find_team(defense, opp_team)
+        if not team_stats or lookup_stat not in team_stats:
+            return {}
+        avg = team_stats[lookup_stat]
+        return {
+            "avg_allowed":  round(avg, 2),
+            "league_avg":   round(league_avg, 2),
+            "is_favorable": avg > league_avg,
+        }
+    except Exception:
+        return {}
 
 
 def _get_mlb_context(opponent_team: str, stat_type: str, direction: str) -> dict | None:

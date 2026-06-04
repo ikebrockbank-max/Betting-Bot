@@ -131,9 +131,20 @@ def _build_advanced_note(p: dict) -> str:
         pm       = p.get("projected_minutes")
         std      = p.get("min_std_dev")
         line_val = p.get("line", 0)
+        p_over   = p.get("p_over")
+        p_under  = p.get("p_under")
+        direction = p.get("direction", "OVER")
         if proj is not None:
-            edge_pct = int((proj - line_val) / (line_val + 1e-9) * 100) if p.get("direction") == "OVER" else int((line_val - proj) / (line_val + 1e-9) * 100)
-            notes.append(f"Proj {proj} (range {proj_low}–{proj_hi}) | Edge {edge_pct:+d}%")
+            edge_pct = int((proj - line_val) / (line_val + 1e-9) * 100) if direction == "OVER" else int((line_val - proj) / (line_val + 1e-9) * 100)
+            # Include P(direction) when the probability engine fired
+            if p_over is not None and p_under is not None:
+                p_dir = p_over if direction == "OVER" else p_under
+                notes.append(
+                    f"Proj {proj} (range {proj_low}–{proj_hi}) | "
+                    f"P({direction.capitalize()}): {int(p_dir*100)}% | Edge {edge_pct:+d}%"
+                )
+            else:
+                notes.append(f"Proj {proj} (range {proj_low}–{proj_hi}) | Edge {edge_pct:+d}%")
         if pm is not None:
             std_str = f"±{std}" if std else ""
             notes.append(f"Exp {pm}{std_str} min")
@@ -158,12 +169,17 @@ def _build_advanced_note(p: dict) -> str:
         if cv is not None and cv < 0.4:
             notes.append("⚠️ volatile mins")
         # Usage trend — show when meaningfully elevated or depressed
-        usage_trend = p.get("usage_trend")
-        usage_adj   = p.get("usage_adj", 1.0)
+        # Also flag if the spike was noisy (usage_confidence < 0.60)
+        usage_trend      = p.get("usage_trend")
+        usage_adj        = p.get("usage_adj", 1.0)
+        usage_confidence = p.get("usage_confidence", 1.0)
         if usage_trend is not None and abs(usage_trend) >= 0.10:
-            pct = int(usage_trend * 100)
+            pct  = int(usage_trend * 100)
             icon = "📈" if usage_trend > 0 else "📉"
-            notes.append(f"{icon} Usage {pct:+d}% (shots/min vs season)")
+            note = f"{icon} Usage {pct:+d}% (shots/min vs season)"
+            if usage_confidence < 0.60:
+                note += f" [noisy, {int(usage_confidence*100)}% conf]"
+            notes.append(note)
         # Injury impact — show method so it's clear if boost is evidence-based
         inj_note = p.get("injury_note", "")
         inj_src  = p.get("injury_adjustment_source", "")
