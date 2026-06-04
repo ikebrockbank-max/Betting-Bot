@@ -70,6 +70,13 @@ def log_pick(result: dict):
         "proj_error":         None,
         "logged_at":          datetime.now(timezone.utc).isoformat(),
         "resolved":           False,
+        # Stored for correlation calibration (learning overlap_correction from data)
+        "game_id":            result.get("game_id", ""),
+        "game_state":         result.get("game_state") or {},
+        "p_over":             result.get("p_over"),
+        "p_under":            result.get("p_under"),
+        "batting_order":      result.get("batting_order"),
+        "player_team":        result.get("player_team", ""),
     }
 
     entries = _load()
@@ -230,6 +237,14 @@ def update_results(target_date: str = None):
             status = "✅ HIT" if hit else "❌ MISS"
             print(f"  {status} {player} {direction} {line} {stat}: actual={actual}"
                   + (f" (proj={proj}, err={e['proj_error']:+.1f})" if proj is not None else ""))
+
+            # Feed resolved pick into correlation calibrator for self-updating learning
+            if e.get("game_id") and e.get("game_state"):
+                try:
+                    from correlation_calibrator import record_pick_resolution as _rcr
+                    _rcr(e, hit)
+                except Exception:
+                    pass
         else:
             print(f"  ⚠️  Could not resolve: {player} {stat} ({sport})")
 

@@ -322,6 +322,19 @@ def joint_game_correlation_factor(legs: list) -> float:
     Returns:
         float joint correlation factor for the full combo [0.65, 1.25].
     """
+    # ── Check for empirically learned factor first ───────────────────────────
+    # When correlation_calibrator has accumulated enough resolved same-game
+    # pairs for this game state bucket (default: 20), use the observed joint
+    # hit rate instead of the formula. This is the self-calibration loop:
+    # model assumptions → structural formula → empirical calibration → learned values.
+    try:
+        from correlation_calibrator import get_learned_joint_factor as _glf
+        _learned = _glf(legs)
+        if _learned is not None:
+            return _learned   # empirical > formula when data is sufficient
+    except Exception:
+        pass
+
     pitcher_fact = correlation_factor_same_game(legs)
     lineup_fact  = lineup_correlation_factor(legs)
 
