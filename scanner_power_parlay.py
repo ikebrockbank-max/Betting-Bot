@@ -495,25 +495,37 @@ def _get_mlb_stats(player_name: str, stat_type: str, line: float) -> dict | None
     return _compute_stats(player_name, stat_type, line, values, "MLB")
 
 
-def _get_wnba_stats(player_name: str, stat_type: str, line: float) -> dict | None:
-    # Use ESPN WNBA box scores (same approach as manual analysis)
+def _get_wnba_stats(player_name: str, stat_type: str, line: float,
+                    opp_team: str = "") -> dict | None:
+    """
+    Fetch WNBA stats with full matchup context:
+    - Current (2026) + prior (2025) season game log
+    - H2H vs today's opponent
+    - Home/away splits from own game log
+    - Opponent defensive context
+    """
     try:
         from data.wnba_stats import get_player_stats as _wnba
-        result = _wnba(player_name, stat_type)
+        result = _wnba(player_name, stat_type, opp_team=opp_team)
         if not result:
             return None
-        # game_values = full filtered game log (most-recent first)
         game_vals = result.get("game_values") or result.get("last_5", [])
         if not game_vals:
             return None
         computed = _compute_stats(player_name, stat_type, line, game_vals, "WNBA")
-        if computed:
-            # Pass through minutes flag and per-36 context
-            computed["minutes_flag"]  = result.get("minutes_flag")
-            computed["season_min"]    = result.get("season_min")
-            computed["l5_min"]        = result.get("l5_min")
-            computed["season_per36"]  = result.get("season_per36")
-            computed["l5_per36"]      = result.get("l5_per36")
+        if not computed:
+            return None
+        # Pass through all enriched context
+        computed["minutes_flag"]  = result.get("minutes_flag")
+        computed["season_min"]    = result.get("season_min")
+        computed["l5_min"]        = result.get("l5_min")
+        computed["season_per36"]  = result.get("season_per36")
+        computed["l5_per36"]      = result.get("l5_per36")
+        computed["wnba_h2h"]      = result.get("h2h")        # H2H vs today's opp
+        computed["home_split"]    = result.get("home_split")
+        computed["away_split"]    = result.get("away_split")
+        computed["opp_def"]       = result.get("opp_def", {})
+        computed["game_log"]      = result.get("game_log", [])
         return computed
     except Exception:
         pass
@@ -585,17 +597,29 @@ def get_stats_for_pick(pick: dict) -> dict | None:
     stat   = pick["stat_type"]
     line   = pick["line"]
 
-    dispatchers = {
-        "NBA":    _get_nba_stats,
-        "WNBA":   _get_wnba_stats,
-        "MLB":    _get_mlb_stats,
-        "TENNIS": _get_tennis_stats,
-        "SOCCER": _get_soccer_stats,
-    }
-    fn = dispatchers.get(sport)
-    if fn is None:
-        return None
     try:
+        if sport == "WNBA":
+            # Pass opponent for H2H and defensive context — resolve from matchup context first
+            opp_team = pick.get("opp_team", "")
+            if not opp_team:
+                try:
+                    from data.matchup_context import get_context
+                    ctx = get_context(sport="WNBA", player_name=player,
+                                     stat_type=stat, game_logs=None, line=line)
+                    opp_team = ctx.get("opp_team", "")
+                except Exception:
+                    pass
+            return _get_wnba_stats(player, stat, line, opp_team=opp_team)
+
+        dispatchers = {
+            "NBA":    _get_nba_stats,
+            "MLB":    _get_mlb_stats,
+            "TENNIS": _get_tennis_stats,
+            "SOCCER": _get_soccer_stats,
+        }
+        fn = dispatchers.get(sport)
+        if fn is None:
+            return None
         return fn(player, stat, line)
     except Exception as e:
         _log(f"Stats failed {sport} {player} {stat}: {e}")
@@ -965,7 +989,60 @@ def score_pick(stats: dict, pick: dict) -> dict:
     # 6. Edge size (15%)
     edge_score = min(1.0, edge_pct / 0.30)
 
-    # 7. Elite rim protector penalty — NBA/WNBA only
+    # 7. WNBA-specific matchup enrichments: H2H, home/away splits, opp defense
+    if sport == "WNBA":
+        direction = stats.get("direction", "OVER")
+        line_val  = stats.get("line", 1)
+
+        # H2H vs today's opponent — adjust matchup score
+        wnba_h2h = stats.get("wnba_h2h")
+        if wnba_h2h and wnba_h2h.get("n", 0) >= 2:
+            h2h_avg = wnba_h2h["avg"]
+            h2h_edge = (h2h_avg - line_val) / (line_val + 1e-9)
+            if direction == "UNDER":
+                h2h_edge = -h2h_edge
+            h2h_adj = max(-0.06, min(0.06, h2h_edge * 0.25))
+            matchup_score = max(0.1, min(0.9, matchup_score + h2h_adj))
+            sign = "✅" if h2h_adj > 0 else "⚠️"
+            ctx.setdefault("description", []).append(
+                f"{sign} vs {ctx.get('opp_team','opp').split()[-1]} H2H: "
+                f"avg {h2h_avg} over {wnba_h2h['n']} games"
+            )
+
+        # Home/away split from own game log
+        ha         = ctx.get("home_away", "unknown")
+        split_key  = "home_split" if ha == "home" else "away_split"
+        split      = stats.get(split_key)
+        if split and split.get("n", 0) >= 4:
+            split_avg  = split["avg"]
+            split_edge = (split_avg - line_val) / (line_val + 1e-9)
+            if direction == "UNDER":
+                split_edge = -split_edge
+            split_adj = max(-0.04, min(0.04, split_edge * 0.15))
+            matchup_score = max(0.1, min(0.9, matchup_score + split_adj))
+            sign = "✅" if split_adj > 0 else "⚠️"
+            ctx.setdefault("description", []).append(
+                f"{sign} {ha.capitalize()} avg: {split_avg} ({split['n']} games)"
+            )
+
+        # Opponent defensive context
+        opp_def = stats.get("opp_def", {})
+        if opp_def.get("avg_allowed") is not None:
+            is_fav    = opp_def.get("is_favorable", False)
+            avg_alwd  = opp_def["avg_allowed"]
+            league_av = opp_def.get("league_avg", avg_alwd)
+            def_adj   = (avg_alwd - league_av) / (league_av + 1e-9) * 0.3
+            if direction == "UNDER":
+                def_adj = -def_adj
+            def_adj = max(-0.05, min(0.05, def_adj))
+            matchup_score = max(0.1, min(0.9, matchup_score + def_adj))
+            opp_name = ctx.get("opp_team", "").split()[-1]
+            sign = "✅" if def_adj > 0 else "⚠️"
+            ctx.setdefault("description", []).append(
+                f"{sign} {opp_name} allows {avg_alwd:.1f} (league avg {league_av:.1f})"
+            )
+
+    # 8. Elite rim protector penalty — NBA/WNBA only
     rim_note = ""
     if sport in ("NBA", "WNBA"):
         opp_team_ctx = ctx.get("opp_team", "unknown")
