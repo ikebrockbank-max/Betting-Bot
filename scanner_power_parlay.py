@@ -597,6 +597,26 @@ def _compute_stats(player: str, stat_type: str, line: float,
     if direction == "UNDER":
         trend = -trend  # invert: for UNDER, decreasing is good
 
+    # stat_std_dev: actual game-to-game outcome variance from the player's log.
+    # Critical distinction: this is NOT the projection CI (proj_low/proj_high),
+    # which measures uncertainty about the mean estimate.
+    # This measures how variable the outcome is game-to-game — the σ the
+    # Gaussian probability model needs to be meaningful.
+    # Without this, the model falls back to half the projection range (σ≈0.5),
+    # which massively underestimates variance for high-variance stats like
+    # turnovers, rebounds, etc. → inflated P(over/under) that doesn't match reality.
+    import statistics as _stat_mod
+    stat_std_dev = round(_stat_mod.stdev(recent), 3) if len(recent) >= 4 else None
+
+    # Zero-inflation components: used by MLB pitcher logic and future
+    # WNBA zero-inflated model (stats like turnovers and steals have heavy
+    # zero-game rate that a pure Gaussian misses).
+    zero_game_count = sum(1 for v in recent if v == 0)
+    p_zero_game     = round(zero_game_count / len(recent), 3) if recent else 0.0
+    _nonzero_vals   = [v for v in recent if v > 0]
+    nonzero_mean    = round(sum(_nonzero_vals) / len(_nonzero_vals), 2) if _nonzero_vals else None
+    nonzero_std     = round(_stat_mod.stdev(_nonzero_vals), 3) if len(_nonzero_vals) >= 3 else None
+
     return {
         "player":        player,
         "stat_type":     stat_type,
@@ -612,6 +632,12 @@ def _compute_stats(player: str, stat_type: str, line: float,
         "recent_values": recent[:8],
         "trend":         round(trend, 3),
         "sport":         sport,
+        # Distribution shape fields — used by the probability engine
+        "stat_std_dev":  stat_std_dev,   # outcome σ (not projection CI)
+        "p_zero_game":   p_zero_game,    # fraction of zero-outcome games
+        "nonzero_mean":  nonzero_mean,   # conditional mean on non-zero games
+        "nonzero_std":   nonzero_std,    # conditional σ on non-zero games
+        "median_val":    round(sorted(recent)[len(recent) // 2], 2),
     }
 
 
