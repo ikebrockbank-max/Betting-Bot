@@ -1543,18 +1543,52 @@ def score_pick(stats: dict, pick: dict) -> dict:
 # STEP 4 — Build optimal parlays
 # ─────────────────────────────────────────────────────────────────────────────
 
+MIN_EV = 0.03    # minimum 3% positive EV to include a parlay (+$0.03 per $1 wagered)
+MIN_P_HIT = 0.55 # minimum per-leg probability (distribution model or confidence fallback)
+
+
+def _get_p_hit(pick: dict) -> float:
+    """
+    Best available P(hit) estimate for a single pick leg.
+
+    Priority:
+      1. p_over / p_under from the distribution model (zero-inflated MLB or WNBA projection).
+         These are actual probabilities from a calibrated statistical model.
+      2. confidence score (composite heuristic) — less precise but widely available.
+
+    Using the distribution probability here (rather than confidence) makes the
+    parlay EV calculation honest: EV = P(parlay) × payout - 1 is only meaningful
+    if P(parlay) is a real probability, not a heuristic score.
+    """
+    direction = pick.get("direction", "OVER")
+    p_over    = pick.get("p_over")
+    p_under   = pick.get("p_under")
+    if direction == "OVER" and p_over and 0.05 < p_over < 0.99:
+        return p_over
+    if direction == "UNDER" and p_under and 0.05 < p_under < 0.99:
+        return p_under
+    return pick.get("confidence", 0.62)
+
+
 def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[dict]:
     """
-    Build optimal parlays from scored picks.
+    Build optimal parlays from scored picks, ranked by true expected value.
 
-    Rules:
-    - Max 1 pick per game (no same-game correlation)
-    - Prefer picks from different sports (independence)
-    - Rank by expected value: P(all win) * payout - 1
+    Uses per-leg P(hit) from the distribution model (p_over / p_under when
+    available, otherwise confidence) — not the composite heuristic score.
+    Applies correlation adjustment for same-game legs before computing EV.
+
+    Filters:
+    - confidence >= MIN_CONF (qualitative model agrees pick is good)
+    - p_hit >= MIN_P_HIT (probability model agrees line is clearable)
+    - Parlay EV >= MIN_EV (positive expected value, not just positive probability)
     """
-    # Filter to minimum confidence
-    eligible = [p for p in scored_picks if p["confidence"] >= MIN_CONF]
-    eligible.sort(key=lambda x: x["confidence"], reverse=True)
+    # Filter: both qualitative model (confidence) AND probability model (p_hit) agree
+    eligible = [
+        p for p in scored_picks
+        if p["confidence"] >= MIN_CONF and _get_p_hit(p) >= MIN_P_HIT
+    ]
+    eligible.sort(key=lambda x: _get_p_hit(x), reverse=True)
 
     # Deduplicate by game: keep highest-confidence pick per game
     by_game: dict[str, dict] = {}
@@ -1578,13 +1612,15 @@ def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[
         best_ev = -999
         best_combo   = None
         best_p_win   = 0.0
+        best_p_win_raw = 0.0
         best_corr    = 1.0
         # Limit combos to top 20 picks to avoid explosion
         top_pool = pool[:20]
         for combo in itertools.combinations(top_pool, n_legs):
+            # Use distribution-model probability per leg (p_over/p_under), not confidence
             p_win = 1.0
             for leg in combo:
-                p_win *= leg["confidence"]
+                p_win *= _get_p_hit(leg)
 
             # ── Same-game correlation adjustment ─────────────────────────────
             # Legs from the same MLB game share a pitcher/game-state risk factor.
@@ -1607,28 +1643,56 @@ def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[
                 ev *= 1.05   # 5% bonus for cross-sport
 
             if ev > best_ev:
-                best_ev    = ev
-                best_combo = combo
-                best_p_win = p_win_adj
-                best_corr  = corr_factor
+                best_ev      = ev
+                best_combo   = combo
+                best_p_win   = p_win_adj
+                best_p_win_raw = p_win
+                best_corr    = corr_factor
 
-        if best_combo and best_ev > 0:
+        if best_combo and best_ev >= MIN_EV:
             corr_note = ""
             if best_corr < 0.97:
                 corr_note = f"⚠️ Same-game correlation penalty ×{best_corr:.2f}"
             elif best_corr > 1.02:
                 corr_note = f"✅ Same-game correlation bonus ×{best_corr:.2f}"
+
+            # Per-leg breakdown for output
+            leg_breakdown = []
+            for leg in best_combo:
+                p_h = _get_p_hit(leg)
+                p_src = "dist" if leg.get("p_over") or leg.get("p_under") else "conf"
+                leg_breakdown.append({
+                    "player":    leg["player"],
+                    "direction": leg["direction"],
+                    "line":      leg["line"],
+                    "stat_type": leg["stat_type"],
+                    "p_hit":     round(p_h, 3),
+                    "p_hit_pct": int(p_h * 100),
+                    "p_src":     p_src,          # "dist" = distribution model, "conf" = fallback
+                    "conf_pct":  leg["conf_pct"],
+                    "hit_rate":  round(leg.get("hit_rate", 0), 3),
+                    "n_games":   leg.get("n_games", 0),
+                    "over_hits": leg.get("over_hits", 0),
+                    "under_hits":leg.get("under_hits", 0),
+                    "sport":     leg["sport"],
+                    "game_id":   leg.get("game_id", ""),
+                })
+
             parlays.append({
-                "legs":       list(best_combo),
-                "n_legs":     n_legs,
-                "payout":     payout,
-                "p_win":      round(best_p_win, 3),
-                "p_win_raw":  round(best_p_win / best_corr if best_corr else best_p_win, 3),
-                "corr_factor": best_corr,
-                "corr_note":  corr_note,
-                "ev":         round(best_ev, 3),
-                "ev_pct":     int(best_ev * 100),
-                "sports":     sorted({leg["sport"] for leg in best_combo}),
+                "legs":          list(best_combo),
+                "leg_breakdown": leg_breakdown,
+                "n_legs":        n_legs,
+                "payout":        payout,
+                "p_win":         round(best_p_win, 3),
+                "p_win_raw":     round(best_p_win_raw, 3),
+                "corr_factor":   best_corr,
+                "corr_note":     corr_note,
+                "ev":            round(best_ev, 3),
+                "ev_pct":        int(best_ev * 100),
+                "ev_rating":     ("HIGH" if best_ev >= 0.20 else
+                                  "MED-HIGH" if best_ev >= 0.10 else
+                                  "MED" if best_ev >= 0.05 else "LOW"),
+                "sports":        sorted({leg["sport"] for leg in best_combo}),
             })
 
     parlays.sort(key=lambda x: x["ev"], reverse=True)
@@ -1743,26 +1807,37 @@ def _format_discord_embed(top_picks: list[dict], parlays: list[dict]) -> dict:
             "inline": False,
         })
 
-    # Parlay recommendations — full names
+    # Parlay recommendations — full breakdown with per-leg P(hit) and EV
     if parlays:
         for par in parlays[:3]:
             leg_lines = []
-            for l in par["legs"]:
-                hits_l = l["over_hits"] if l["direction"] == "OVER" else l["under_hits"]
+            # Use leg_breakdown if available (has p_hit from distribution model)
+            breakdown = par.get("leg_breakdown") or []
+            for i, l in enumerate(par["legs"]):
+                bd = breakdown[i] if i < len(breakdown) else {}
+                p_hit_pct = bd.get("p_hit_pct") or l.get("conf_pct", 0)
+                hits_l    = l["over_hits"] if l["direction"] == "OVER" else l["under_hits"]
+                n         = l.get("n_games", 0)
+                p_src_tag = " 📊" if bd.get("p_src") == "dist" else ""
                 leg_lines.append(
-                    f"• {l['player']} {l['direction']} **{l['line']}** {l['stat_type']} "
-                    f"({hits_l}/{l['n_games']} hit, {l['conf_pct']}%)"
+                    f"• {l['player']} {l['direction']} **{l['line']}** {l['stat_type']}\n"
+                    f"  P(hit): **{p_hit_pct}%**{p_src_tag} · {hits_l}/{n} historical · {l['conf_pct']}% conf"
                 )
-            corr_note = par.get("corr_note", "")
-            corr_str  = f"\n{corr_note}" if corr_note else ""
+
+            corr_note  = par.get("corr_note", "")
+            ev_rating  = par.get("ev_rating", "")
+            p_win_raw  = par.get("p_win_raw", par["p_win"])
+            p_win_adj  = par["p_win"]
+            adj_str    = (f" → **{int(p_win_adj*100)}%** after correlation"
+                          if abs(p_win_raw - p_win_adj) >= 0.01 else "")
+
             fields.append({
-                "name":  f"🎯 {par['n_legs']}-Leg Power Parlay — {par['payout']}x payout",
+                "name":  f"🎯 {par['n_legs']}-Leg Parlay — {par['payout']}x | EV: +{par['ev_pct']}% [{ev_rating}]",
                 "value": (
                     "\n".join(leg_lines) + "\n"
-                    f"**Win prob: {int(par['p_win']*100)}%** | "
-                    f"**EV: +{par['ev_pct']}%** | "
-                    f"Sports: {', '.join(par['sports'])}"
-                    + corr_str
+                    f"P(win): **{int(p_win_raw*100)}%**{adj_str}\n"
+                    f"**EV: +{par['ev_pct']}%** on $1 wagered | Sports: {', '.join(par['sports'])}"
+                    + (f"\n{corr_note}" if corr_note else "")
                 ),
                 "inline": False,
             })
