@@ -903,8 +903,45 @@ def score_pick(stats: dict, pick: dict) -> dict:
     line       = stats.get("line", 1)
     trend      = stats.get("trend", 0)
 
+    # ── MLB batter: two structural adjustments before edge gate ──────────────
+    # 1. Median over mean for zero-inflated / right-skewed distributions
+    #    (Fantasy Score, Total Bases, Hits, etc.) — mean is inflated by outlier
+    #    games; median is the more honest central tendency.
+    # 2. Pitcher strength prior — scale expected output by opponent difficulty.
+    #    An ace starter (Wheeler/Cole tier) should reduce expected batter output;
+    #    a weak starter should increase it. Without this, the model treats all
+    #    RHP identically except for thin career H2H samples.
+    _MLB_SKEWED = {"Hitter Fantasy Score", "Total Bases", "Hits+Runs+RBIs",
+                   "Singles", "Hits"}
+    effective_avg   = avg
+    pitcher_adj_note = ""
+
+    if sport == "MLB" and stat_type not in _PITCHER_STAT_TYPES:
+        # Step 1: prefer median for skewed distributions
+        median_val = stats.get("median_val")
+        if median_val is not None and stat_type in _MLB_SKEWED:
+            effective_avg = median_val
+
+        # Step 2: apply pitcher difficulty multiplier
+        diff_mult    = stats.get("difficulty_multiplier", 1.0)
+        pitcher_tier = stats.get("pitcher_tier", "")
+        if diff_mult != 1.0:
+            effective_avg = round(effective_avg * diff_mult, 2)
+            skill_score   = stats.get("pitcher_skill_score")
+            if diff_mult <= 0.82:
+                tier_emoji = "⚠️"
+                pitcher_adj_note = (f"{tier_emoji} {pitcher_tier.replace('_',' ').title()} pitcher "
+                                    f"(×{diff_mult:.2f} adj — skill {skill_score:.1f}/10)")
+            elif diff_mult <= 0.92:
+                pitcher_adj_note = (f"Above-avg pitcher "
+                                    f"(×{diff_mult:.2f} — skill {skill_score:.1f}/10)")
+            elif diff_mult >= 1.12:
+                pitcher_adj_note = (f"✅ Weak pitcher "
+                                    f"(×{diff_mult:.2f} — skill {skill_score:.1f}/10)")
+
     # Hard gate: skip picks with less than 8% edge vs the line
-    edge_pct = abs(avg - line) / (line + 1e-9)
+    # Uses effective_avg so ace-pitcher matchups can correctly fail the gate
+    edge_pct = abs(effective_avg - line) / (line + 1e-9)
     if edge_pct < MIN_EDGE_PCT:
         result = {**pick, **stats}
         result["confidence"] = 0.0
@@ -1028,8 +1065,12 @@ def score_pick(stats: dict, pick: dict) -> dict:
 
     opp_score = inj_mult * data_conf * rest_mult * opp_score_base
 
-    # 6. Edge size (15%)
+    # 6. Edge size (15%) — uses effective_avg (post median + pitcher adjustment)
     edge_score = min(1.0, edge_pct / 0.30)
+
+    # Surface pitcher adjustment in context notes for MLB batter picks
+    if pitcher_adj_note:
+        ctx.setdefault("description", []).insert(0, pitcher_adj_note)
 
     # 7. Line movement signal — store adjustment, apply after confidence is computed
     line_movement_note = ""
@@ -1169,8 +1210,11 @@ def score_pick(stats: dict, pick: dict) -> dict:
             hit_score, WEIGHTS["hit_rate"])
     _driver(f"matchup ({ctx.get('opp_team','?').split()[-1]})",
             matchup_score, WEIGHTS["matchup"])
-    _driver(f"edge (avg {stats.get('avg',0):.1f} vs line {stats.get('line',0)})",
-            edge_score, WEIGHTS["edge_size"])
+    # Show effective_avg in edge driver when pitcher adjustment changed it
+    _edge_label = (f"edge (eff {effective_avg:.1f} vs line {stats.get('line',0)})"
+                   if effective_avg != avg
+                   else f"edge (avg {stats.get('avg',0):.1f} vs line {stats.get('line',0)})")
+    _driver(_edge_label, edge_score, WEIGHTS["edge_size"])
     _driver("recent form", trend_score, WEIGHTS["recent_form"])
     _driver("environment", env_score, WEIGHTS["environment"])
 
@@ -1378,6 +1422,13 @@ def score_pick(stats: dict, pick: dict) -> dict:
     result["cal_note"]                 = cal_note
     result["p_over"]                   = p_over
     result["p_under"]                  = p_under
+    # MLB pitcher strength prior fields
+    result["pitcher_skill_score"]      = stats.get("pitcher_skill_score")
+    result["pitcher_tier"]             = stats.get("pitcher_tier", "")
+    result["difficulty_multiplier"]    = stats.get("difficulty_multiplier", 1.0)
+    result["pitcher_skill_desc"]       = stats.get("pitcher_skill_desc", "")
+    result["effective_avg"]            = effective_avg
+    result["median_val"]               = stats.get("median_val")
 
     return result
 
