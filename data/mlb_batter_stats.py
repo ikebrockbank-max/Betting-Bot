@@ -463,7 +463,9 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
     import statistics as _stat_mod
     _SKEWED_STATS = {"Hitter Fantasy Score", "Total Bases", "Hits+Runs+RBIs",
                      "Singles", "Hits"}
-    median_val = round(_stat_mod.median(recent), 2) if stat_type in _SKEWED_STATS else None
+    median_val   = round(_stat_mod.median(recent), 2) if stat_type in _SKEWED_STATS else None
+    # Standard deviation for the probability distribution engine (P(over)/P(under))
+    stat_std_dev = round(_stat_mod.stdev(recent), 2) if len(recent) >= 4 else None
 
     # ── Pitcher strength prior (opponent quality layer) ───────────────────────
     # Fetch a composite skill score for today's opposing pitcher so the batter
@@ -551,8 +553,9 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
         "park_factor":     ctx.get("park_factor", 1.0),
         "context_notes":   ctx.get("context_notes", []),
         "sport":           "MLB",
-        # Skewed-stat median
+        # Skewed-stat median + std dev for probability engine
         "median_val":      median_val,
+        "stat_std_dev":    stat_std_dev,
         # Pitcher strength prior
         "pitcher_skill_score":   pitcher_skill.get("skill_score"),
         "pitcher_tier":          pitcher_tier,

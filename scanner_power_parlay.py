@@ -922,22 +922,43 @@ def score_pick(stats: dict, pick: dict) -> dict:
         if median_val is not None and stat_type in _MLB_SKEWED:
             effective_avg = median_val
 
-        # Step 2: apply pitcher difficulty multiplier
+        # Step 2: apply pitcher difficulty multiplier, dampened by H2H richness.
+        #
+        # The generic skill-score (ERA/K%/WHIP) and the career H2H batting avg
+        # both measure the same thing: how hard is this pitcher for this batter?
+        # When we have 10+ career AB vs the specific pitcher, H2H already prices
+        # in his difficulty — applying the full skill-score multiplier on top
+        # would double-count. Dampen proportionally:
+        #   0 AB  → 100% of multiplier (no H2H — skill score is our only signal)
+        #  10 AB  → 70%  of multiplier
+        #  20+ AB → 40%  of multiplier (H2H is now the primary difficulty signal)
         diff_mult    = stats.get("difficulty_multiplier", 1.0)
         pitcher_tier = stats.get("pitcher_tier", "")
         if diff_mult != 1.0:
-            effective_avg = round(effective_avg * diff_mult, 2)
-            skill_score   = stats.get("pitcher_skill_score")
-            if diff_mult <= 0.82:
-                tier_emoji = "⚠️"
-                pitcher_adj_note = (f"{tier_emoji} {pitcher_tier.replace('_',' ').title()} pitcher "
-                                    f"(×{diff_mult:.2f} adj — skill {skill_score:.1f}/10)")
-            elif diff_mult <= 0.92:
-                pitcher_adj_note = (f"Above-avg pitcher "
-                                    f"(×{diff_mult:.2f} — skill {skill_score:.1f}/10)")
-            elif diff_mult >= 1.12:
-                pitcher_adj_note = (f"✅ Weak pitcher "
-                                    f"(×{diff_mult:.2f} — skill {skill_score:.1f}/10)")
+            h2h_ab         = int((stats.get("h2h") or {}).get("ab", 0) or 0)
+            pitcher_weight = max(0.40, 1.0 - min(1.0, h2h_ab / 20.0) * 0.60)
+            dampened_mult  = round(1.0 + (diff_mult - 1.0) * pitcher_weight, 3)
+            effective_avg  = round(effective_avg * dampened_mult, 2)
+            skill_score    = stats.get("pitcher_skill_score")
+            if h2h_ab >= 10:
+                # H2H is the primary difficulty signal — note the dampening
+                pitcher_adj_note = (
+                    f"Pitcher adj ×{dampened_mult:.2f} "
+                    f"(dampened from ×{diff_mult:.2f} — {h2h_ab} career AB vs pitcher)"
+                )
+            elif dampened_mult <= 0.82:
+                pitcher_adj_note = (
+                    f"⚠️ {pitcher_tier.replace('_',' ').title()} pitcher "
+                    f"(×{dampened_mult:.2f} adj — skill {skill_score:.1f}/10)"
+                )
+            elif dampened_mult <= 0.92:
+                pitcher_adj_note = (
+                    f"Above-avg pitcher (×{dampened_mult:.2f} — skill {skill_score:.1f}/10)"
+                )
+            elif dampened_mult >= 1.12:
+                pitcher_adj_note = (
+                    f"✅ Weak pitcher (×{dampened_mult:.2f} — skill {skill_score:.1f}/10)"
+                )
 
     # Hard gate: skip picks with less than 8% edge vs the line
     # Uses effective_avg so ace-pitcher matchups can correctly fail the gate
@@ -1340,7 +1361,12 @@ def score_pick(stats: dict, pick: dict) -> dict:
     # composite scoring model unchanged.
     p_over  = None
     p_under = None
+    # WNBA: per-minute projection (most accurate — real minutes model).
+    # MLB batter: fall back to effective_avg (pitcher-adjusted projection center).
+    # MLB pitcher / NBA: no probability blending (insufficient σ signal).
     proj_stat_val = stats.get("projected_stat")
+    if proj_stat_val is None and sport == "MLB" and stat_type not in _PITCHER_STAT_TYPES:
+        proj_stat_val = effective_avg if (effective_avg and effective_avg > 0) else None
     if proj_stat_val is not None and proj_stat_val > 0 and line > 0:
         import math as _math
         _std = None
@@ -1367,13 +1393,21 @@ def score_pick(stats: dict, pick: dict) -> dict:
             p_over  = round(max(0.01, min(0.99, 1.0 - _cdf)), 3)
             p_under = round(max(0.01, min(0.99, _cdf)), 3)
 
-            # For WNBA: blend distribution probability into confidence score.
-            # We have a real per-minute projection here, so the normal model is
-            # meaningful. 55% composite + 45% distribution.
+            # Blend distribution probability into confidence score.
+            # WNBA: 55/45 — real per-minute projection, σ is calibrated and meaningful.
+            # MLB batter: 65/35 — effective_avg as center is less precise, σ from
+            #   batter's own recent variance (stat_std_dev). Lower blend weight
+            #   because the projection center is a career/season average, not a
+            #   true minutes-based model.
             if sport == "WNBA":
                 _p_model = p_over if direction == "OVER" else p_under
                 if 0.05 < _p_model < 0.95:
                     confidence = round(confidence * 0.55 + _p_model * 0.45, 3)
+            elif sport == "MLB" and stat_type not in _PITCHER_STAT_TYPES:
+                _mlb_dir = stats.get("direction", "OVER")
+                _p_model = p_over if _mlb_dir == "OVER" else p_under
+                if 0.05 < _p_model < 0.95:
+                    confidence = round(confidence * 0.65 + _p_model * 0.35, 3)
 
     result = {**pick, **stats}
     result["hit_score"]       = round(hit_score, 3)
