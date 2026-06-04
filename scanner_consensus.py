@@ -26,10 +26,11 @@ from pathlib import Path
 # User wants "much different" — only fire on genuinely significant discrepancies.
 # Example that fires: PP=24.5 pts, consensus=19.5 pts → diff=5.0 (25%) ✓
 # Example that doesn't: PP=22.5, consensus=20.5 → diff=2.0 (9.7%) ✗
-MIN_ABS_DIFF  = 1.0   # minimum absolute gap (units) — catches ≥1 unit off
-MIN_PCT_DIFF  = 0.06  # minimum percentage gap (6%)  — catches ≥6% off
-# Either threshold alone is sufficient (OR logic) — PP now tracks books within ±0.5 so
-# requiring BOTH would produce 0 alerts. A 1-unit gap OR a 6%+ gap is meaningful.
+MIN_ABS_DIFF  = 1.5   # minimum absolute gap (units) — requires 3+ half-steps from consensus
+MIN_PCT_DIFF  = 0.08  # minimum percentage gap (8%)  — both must be met
+# Both thresholds are required (AND logic). PP rounds to 0.5 increments, so a 0.5 or
+# 1.0 unit gap is often just rounding noise. A 1.5+ unit gap at 8%+ is a genuine
+# mispricing worth alerting on. Expect 0-5 alerts on a typical day.
 MIN_BOOKS     = 2     # need at least this many books to trust consensus
 
 # ── PP stat name → Action Network / Odds API market key ───────────────────────
@@ -150,8 +151,10 @@ def _compare(platform_line: float, consensus: float, player: str, stat: str,
     abs_diff = abs(diff)
     pct_diff = abs_diff / consensus if consensus > 0 else 0
 
-    # OR logic: either a meaningful absolute gap or a meaningful percentage gap
-    if abs_diff < MIN_ABS_DIFF and pct_diff < MIN_PCT_DIFF:
+    # AND logic: both a meaningful absolute gap AND a meaningful percentage gap required.
+    # PP rounds to 0.5 increments — a 0.5 or 1.0 unit gap is usually just rounding.
+    # 1.5+ units AND 8%+ signals a genuine mispricing, not noise.
+    if abs_diff < MIN_ABS_DIFF or pct_diff < MIN_PCT_DIFF:
         return None
 
     direction = "under" if diff > 0 else "over"
