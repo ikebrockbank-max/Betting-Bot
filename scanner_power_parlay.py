@@ -1,0 +1,1511 @@
+"""
+scanner_power_parlay.py — Comprehensive multi-sport parlay optimizer.
+
+Pulls ALL standard (non-goblin, non-demon) PrizePicks lines across:
+  NBA · MLB · WNBA · TENNIS · SOCCER · NHL
+
+Scores every pick on 5 dimensions:
+  1. Hit rate          (40%) — how often player beats this exact line recently
+  2. Edge size         (25%) — gap between player avg and PP line
+  3. Trend             (15%) — L3 vs L8 form trajectory
+  4. Opponent context  (10%) — defensive ranking, K-rate, surface
+  5. Situational       (10%) — home/away, injury, rest, weather
+
+Builds optimal parlays for PP payout tiers:
+  2-pick: 3x  | 3-pick: 5x  | 4-pick: 10x  | 5-pick: 20x
+
+Run: python3 scanner_power_parlay.py
+Auto: every 4 hours via GitHub Actions (scan.yml)
+"""
+
+import json
+import os
+import sys
+import time
+import urllib.request
+import itertools
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+LEAGUE_IDS = {"NBA": 7, "MLB": 2, "WNBA": 3, "TENNIS": 5, "SOCCER": 82, "NHL": 8}
+
+PP_PAYOUTS   = {2: 3.0, 3: 5.0, 4: 10.0, 5: 20.0}
+PP_BREAKEVEN = {n: 1 / p for n, p in PP_PAYOUTS.items()}  # fraction parlay must hit
+
+MIN_CONF      = 0.62   # minimum individual confidence to include
+MIN_EDGE_PCT  = 0.08   # minimum 8% gap between player avg and PP line
+MIN_GAMES       = 6    # minimum game history required (MLB needs 6+ starts for reliability)
+MIN_GAMES_NBA   = 8    # NBA needs more games for stability
+MAX_PARLAY    = 5      # max legs to consider
+DEDUP_HOURS   = 4      # don't re-alert same pick within this window
+
+# Scoring weights — based on ChatGPT's recommended model, adapted to available data
+# MLB pitcher: hit_rate + recent_form + handedness + arsenal + park/weather + lineup + bullpen + vegas + opp_def + edge
+# NBA/WNBA: hit_rate + recent_form + opponent_defense + home_away_splits + edge + situational
+WEIGHTS = {
+    "hit_rate":    0.20,  # how often they've hit this exact line
+    "recent_form": 0.15,  # L3 vs L8 trend
+    "matchup":     0.25,  # handedness splits + arsenal + opp K rate + park + umpire (MLB)
+                          # or opponent def rating + home/away splits (NBA)
+    "environment": 0.15,  # park factor + weather + game total (vegas)
+    "opportunity": 0.10,  # lineup position + bullpen + role/minutes
+    "edge_size":   0.15,  # gap between avg and line
+}
+
+CACHE_DIR = Path("logs/parlay_cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+SENT_LOG  = Path("logs/parlay_sent.json")
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def _log(msg: str):
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"[parlay {ts}] {msg}", flush=True)
+
+def _get_json(url: str, extra_headers: dict = None) -> dict:
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, headers=headers)
+    return json.loads(urllib.request.urlopen(req, timeout=12).read())
+
+def _cache(key: str, ttl: int = 1800):
+    """Decorator-style: return cached value if fresh, else None."""
+    p = CACHE_DIR / f"{key[:80].replace('/','_').replace(' ','_')}.json"
+    if p.exists() and (time.time() - p.stat().st_mtime) < ttl:
+        try:
+            return json.loads(p.read_text()), p
+        except Exception:
+            pass
+    return None, p
+
+def _save(p: Path, data):
+    try:
+        p.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+def _load_sent() -> dict:
+    if SENT_LOG.exists():
+        try:
+            return json.loads(SENT_LOG.read_text())
+        except Exception:
+            pass
+    return {}
+
+def _save_sent(data: dict):
+    try:
+        SENT_LOG.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 1 — Pull standard PrizePicks lines
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_start_time(st: str) -> datetime | None:
+    """Parse PP start_time string to UTC datetime."""
+    if not st:
+        return None
+    try:
+        # PP format: "2026-06-01T19:05:00.000-04:00"
+        # Strip milliseconds and parse
+        st_clean = st.split(".")[0] + st[st.rfind("-", 10):]   # keep tz offset
+        if "+" in st_clean[10:] or "-" in st_clean[10:]:
+            # Has timezone offset — parse manually
+            import re
+            m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})([+-]\d{2}:\d{2})", st_clean)
+            if m:
+                dt_str, tz_str = m.groups()
+                tz_h, tz_m = int(tz_str[:3]), int(tz_str[4:])
+                offset = timedelta(hours=tz_h, minutes=(tz_m if tz_h >= 0 else -tz_m))
+                dt_naive = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S")
+                return dt_naive.replace(tzinfo=timezone.utc) - offset
+    except Exception:
+        pass
+    return None
+
+def fetch_standard_lines(sports: list[str] = None, days_ahead: int = 1) -> list[dict]:
+    """
+    Pull all STANDARD (non-goblin, non-demon) pre-game single-stat projections
+    for games starting within the next `days_ahead` days (default: today only).
+
+    Cache key includes today's date so stale data never bleeds into the next day.
+    """
+    if sports is None:
+        sports = list(LEAGUE_IDS.keys())
+
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Window: now → days_ahead days from now
+    now_utc   = datetime.now(timezone.utc)
+    cutoff    = now_utc + timedelta(days=days_ahead)
+
+    lines = []
+    for sport in sports:
+        lid = LEAGUE_IDS.get(sport)
+        if not lid:
+            continue
+        # Date-stamped cache key — expires with the day, never serves yesterday's games
+        cached, cpath = _cache(f"pp_standard_{sport}_{today_str}", ttl=900)
+        if cached is not None:
+            lines.extend(cached)
+            continue
+
+        try:
+            url = (f"https://api.prizepicks.com/projections"
+                   f"?league_id={lid}&per_page=500&single_stat=true&state_code=AZ")
+            data = _get_json(url, {"Referer": "https://app.prizepicks.com/"})
+            players = {
+                p["id"]: p["attributes"].get("name", "?")
+                for p in data.get("included", [])
+                if p["type"] == "new_player"
+            }
+            sport_lines = []
+            skipped_future = 0
+            for proj in data.get("data", []):
+                a = proj["attributes"]
+                if a.get("odds_type") != "standard":
+                    continue
+                if a.get("status") != "pre_game":
+                    continue
+                if a.get("projection_type") != "Single Stat":
+                    continue
+
+                # ── DATE FILTER: only games starting within the window ──────────
+                start_time_str = a.get("start_time", "")
+                game_dt = _parse_start_time(start_time_str)
+                if game_dt:
+                    if game_dt < now_utc:
+                        continue   # game already started / past
+                    if game_dt > cutoff:
+                        skipped_future += 1
+                        continue   # too far in the future
+
+                pid  = proj["relationships"].get("new_player", {}).get("data", {}).get("id", "")
+                name = players.get(pid, "?")
+                if name == "?":
+                    continue
+                # Skip combo props — player name contains "+" or stat type has "(Combo)"
+                if "+" in name or "(Combo)" in a.get("stat_type", ""):
+                    continue
+                # Skip 1st inning props — too small sample, too volatile
+                if "1st Inning" in a.get("stat_type", ""):
+                    continue
+                sport_lines.append({
+                    "player":     name,
+                    "stat_type":  a.get("stat_type", "?"),
+                    "line":       float(a.get("line_score", 0)),
+                    "sport":      sport,
+                    "game_id":    a.get("game_id", ""),
+                    "start_time": start_time_str,
+                    "pp_id":      proj["id"],
+                })
+
+            _save(cpath, sport_lines)
+            lines.extend(sport_lines)
+            _log(f"{sport}: {len(sport_lines)} standard lines today"
+                 + (f" ({skipped_future} future games skipped)" if skipped_future else ""))
+            time.sleep(0.8)
+        except Exception as e:
+            _log(f"{sport}: PP fetch failed — {e}")
+
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 2 — Get historical stats per sport
+# ─────────────────────────────────────────────────────────────────────────────
+
+NBA_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json",
+    "Referer": "https://www.nba.com",
+    "x-nba-stats-origin": "stats",
+    "x-nba-stats-token": "true",
+    "Origin": "https://www.nba.com",
+}
+
+_NBA_STAT_MAP = {
+    "Points":            "PTS",
+    "Rebounds":          "REB",
+    "Assists":           "AST",
+    "3-Pointers Made":   "FG3M",
+    "Steals":            "STL",
+    "Blocks":            "BLK",
+    "Turnovers":         "TOV",
+    "Pts+Rebs+Asts":     None,  # computed
+    "Pts+Rebs":          None,
+    "Pts+Asts":          None,
+}
+
+def _get_nba_player_id(player_name: str) -> str | None:
+    cached, cpath = _cache(f"nba_pid_{player_name}", ttl=86400)
+    if cached:
+        return cached.get("id")
+    try:
+        url  = "https://stats.nba.com/stats/commonallplayers?LeagueID=00&Season=2025-26&IsOnlyCurrentSeason=1"
+        data = _get_json(url, NBA_HEADERS)
+        rows = data["resultSets"][0]["rowSet"]
+        hdrs = data["resultSets"][0]["headers"]
+        name_idx = hdrs.index("DISPLAY_FIRST_LAST")
+        id_idx   = hdrs.index("PERSON_ID")
+        name_lower = player_name.lower()
+        for row in rows:
+            if row[name_idx].lower() == name_lower:
+                pid = str(row[id_idx])
+                _save(cpath, {"id": pid})
+                return pid
+        # Fuzzy: last name match
+        last = player_name.split()[-1].lower()
+        for row in rows:
+            if last in row[name_idx].lower():
+                pid = str(row[id_idx])
+                _save(cpath, {"id": pid})
+                return pid
+    except Exception as e:
+        _log(f"NBA player ID lookup failed for {player_name}: {e}")
+    return None
+
+def _nba_game_log(player_id: str, season: str = "2025-26") -> list[dict]:
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cached, cpath = _cache(f"nba_log_{player_id}_{season}_{today_str}", ttl=3600)
+    if cached:
+        return cached
+    try:
+        url  = (f"https://stats.nba.com/stats/playergamelogs"
+                f"?PlayerID={player_id}&Season={season}&SeasonType=Regular+Season&LeagueID=00")
+        data = _get_json(url, NBA_HEADERS)
+        rs   = data["resultSets"][0]
+        hdrs = rs["headers"]
+        rows = rs["rowSet"]
+        games = []
+        for row in rows:
+            g = dict(zip(hdrs, row))
+            games.append({
+                "date":       g.get("GAME_DATE", ""),
+                "matchup":    g.get("MATCHUP", ""),
+                "pts":        g.get("PTS", 0) or 0,
+                "reb":        g.get("REB", 0) or 0,
+                "ast":        g.get("AST", 0) or 0,
+                "fg3m":       g.get("FG3M", 0) or 0,
+                "stl":        g.get("STL", 0) or 0,
+                "blk":        g.get("BLK", 0) or 0,
+                "tov":        g.get("TOV", 0) or 0,
+                "min":        int(float(g.get("MIN", 0) or 0)),
+            })
+        # Also try playoffs — prepend so most-recent game is always games[0]
+        try:
+            url2 = url.replace("Regular+Season", "Playoffs")
+            d2   = _get_json(url2, NBA_HEADERS)
+            rs2  = d2["resultSets"][0]
+            playoff_games = []
+            for row in rs2["rowSet"]:
+                g = dict(zip(rs2["headers"], row))
+                playoff_games.append({
+                    "date":    g.get("GAME_DATE", ""),
+                    "matchup": g.get("MATCHUP", ""),
+                    "pts":     g.get("PTS", 0) or 0,
+                    "reb":     g.get("REB", 0) or 0,
+                    "ast":     g.get("AST", 0) or 0,
+                    "fg3m":    g.get("FG3M", 0) or 0,
+                    "stl":     g.get("STL", 0) or 0,
+                    "blk":     g.get("BLK", 0) or 0,
+                    "tov":     g.get("TOV", 0) or 0,
+                    "min":     int(float(g.get("MIN", 0) or 0)),
+                    "playoff": True,
+                })
+            # Sort descending by date so most-recent playoff game is first
+            playoff_games.sort(key=lambda x: x["date"], reverse=True)
+            games = playoff_games + games
+        except Exception:
+            pass
+        _save(cpath, games)
+        return games
+    except Exception as e:
+        _log(f"NBA game log failed ({player_id}): {e}")
+        return []
+
+def _get_nba_stats(player_name: str, stat_type: str, line: float) -> dict | None:
+    pid = _get_nba_player_id(player_name)
+    if not pid:
+        return None
+    games = _nba_game_log(pid)
+    if not games:
+        return None
+
+    def val(g):
+        if stat_type == "Points":       return g["pts"]
+        if stat_type == "Rebounds":     return g["reb"]
+        if stat_type == "Assists":      return g["ast"]
+        if stat_type == "3-Pointers Made": return g["fg3m"]
+        if stat_type == "Steals":       return g["stl"]
+        if stat_type == "Blocks":       return g["blk"]
+        if stat_type == "Turnovers":    return g["tov"]
+        if stat_type == "Pts+Rebs+Asts": return g["pts"] + g["reb"] + g["ast"]
+        if stat_type == "Pts+Rebs":     return g["pts"] + g["reb"]
+        if stat_type == "Pts+Asts":     return g["pts"] + g["ast"]
+        return None
+
+    # Prioritise playoff games (already at front if present)
+    values = []
+    for g in games:
+        v = val(g)
+        if v is not None and g.get("min", 0) >= 10:
+            values.append(v)
+
+    result = _compute_stats(player_name, stat_type, line, values, "NBA")
+    if result:
+        result["_raw_game_logs"] = games
+
+        # Rest days: days between most recent game and today
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            last_date_raw = games[0].get("date", "") if games else ""
+            if last_date_raw:
+                # NBA dates come as ISO: "2026-04-19T00:00:00" or plain "2026-04-19"
+                date_part = last_date_raw[:10]   # always take YYYY-MM-DD prefix
+                last_date  = datetime.strptime(date_part, "%Y-%m-%d").date()
+                today_date = datetime.strptime(today_str, "%Y-%m-%d").date()
+                rest = max(0, (today_date - last_date).days - 1)
+                result["rest_days"] = rest
+        except Exception:
+            pass
+
+        # Minutes trend — use playoff minutes when available (more relevant than regular season)
+        try:
+            playoff_mins = [g.get("min", 0) for g in games if g.get("playoff") and g.get("min", 0) > 0]
+            all_mins     = [g.get("min", 0) for g in games if g.get("min", 0) > 0]
+            if len(all_mins) >= 5:
+                if len(playoff_mins) >= 3:
+                    # Enough playoff data: compare recent playoff games vs playoff avg
+                    season_min = sum(playoff_mins) / len(playoff_mins)
+                    l5_min     = sum(playoff_mins[:min(5, len(playoff_mins))]) / min(5, len(playoff_mins))
+                else:
+                    season_min = sum(all_mins) / len(all_mins)
+                    l5_min     = sum(all_mins[:5]) / 5
+                result["season_min"]   = round(season_min, 1)
+                result["l5_min"]       = round(l5_min, 1)
+                result["minutes_flag"] = (
+                    "elevated" if l5_min > season_min * 1.15 else
+                    "reduced"  if l5_min < season_min * 0.85 else None
+                )
+                if playoff_mins:
+                    result["playoff_games"]   = len(playoff_mins)
+                    result["playoff_min_avg"] = round(sum(playoff_mins) / len(playoff_mins), 1)
+        except Exception:
+            pass
+
+    return result
+
+
+def _normalize_name(name: str) -> str:
+    """Strip accents/diacritics for MLB API search (Sánchez → Sanchez)."""
+    import unicodedata
+    return "".join(
+        c for c in unicodedata.normalize("NFD", name)
+        if unicodedata.category(c) != "Mn"
+    )
+
+def _get_mlb_pitcher_id(player_name: str) -> str | None:
+    cached, cpath = _cache(f"mlb_pid_{player_name}", ttl=86400)
+    if cached:
+        return cached.get("id")
+    # Try exact name first, then accent-stripped, then last-name-only fallback
+    search_variants = [
+        player_name,
+        _normalize_name(player_name),
+        player_name.split()[-1],  # last name only
+    ]
+    for variant in search_variants:
+        try:
+            enc  = variant.replace(" ", "+")
+            url  = f"https://statsapi.mlb.com/api/v1/people/search?names={enc}&sportId=1"
+            data = _get_json(url)
+            for p in data.get("people", []):
+                full = p.get("fullName", "")
+                # Match: normalized versions of both names match
+                if (_normalize_name(player_name).lower() in _normalize_name(full).lower() or
+                        _normalize_name(full).lower() in _normalize_name(player_name).lower()):
+                    pid = str(p["id"])
+                    _save(cpath, {"id": pid, "matched_name": full})
+                    return pid
+        except Exception:
+            pass
+    return None
+
+def _get_mlb_stats(player_name: str, stat_type: str, line: float) -> dict | None:
+    """Route all MLB stat types through the comprehensive batter/pitcher stats module."""
+    try:
+        from data.mlb_batter_stats import get_player_stats as _mlb_full
+        return _mlb_full(player_name, stat_type, line)
+    except Exception as e:
+        _log(f"MLB stats failed {player_name} {stat_type}: {e}")
+        return None
+    # Legacy pitcher-only path (kept as fallback)
+    pid = _get_mlb_pitcher_id(player_name)
+    if not pid:
+        return None
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cached, cpath = _cache(f"mlb_log_{pid}_{today_str}", ttl=3600)
+    if cached:
+        games = cached
+    else:
+        try:
+            url   = f"https://statsapi.mlb.com/api/v1/people/{pid}/stats?stats=gameLog&group=pitching&season=2026"
+            data  = _get_json(url)
+            splits = data.get("stats", [{}])[0].get("splits", [])
+            games  = []
+            for s in splits:
+                ip = s["stat"].get("inningsPitched", "0")
+                try:
+                    ip_f = float(ip)
+                except Exception:
+                    ip_f = 0
+                if ip_f < 2.0:     # skip relief appearances (< 2 IP not a real start)
+                    continue
+                games.append({
+                    "date":    s.get("date", ""),
+                    "opp":     s.get("opponent", {}).get("name", "?"),
+                    "ks":      s["stat"].get("strikeOuts", 0),
+                    "hits":    s["stat"].get("hits", 0),
+                    "walks":   s["stat"].get("baseOnBalls", 0),
+                    "er":      s["stat"].get("earnedRuns", 0),
+                    "ip":      ip_f,
+                })
+            games = sorted(games, key=lambda x: x["date"], reverse=True)
+            _save(cpath, games)
+        except Exception as e:
+            _log(f"MLB log failed ({pid}): {e}")
+            return None
+
+    def val(g):
+        if stat_type in ("Strikeouts", "Pitcher Strikeouts"): return g["ks"]
+        if stat_type == "Hits Allowed":   return g["hits"]
+        if stat_type == "Walks":          return g["walks"]
+        if stat_type == "Earned Runs":    return g["er"]
+        return None
+
+    values = [val(g) for g in games if val(g) is not None]
+    return _compute_stats(player_name, stat_type, line, values, "MLB")
+
+
+def _get_wnba_stats(player_name: str, stat_type: str, line: float) -> dict | None:
+    # Use ESPN WNBA box scores (same approach as manual analysis)
+    # Search for player in recent games
+    try:
+        from data.wnba_stats import get_player_stats as _wnba
+        result = _wnba(player_name, stat_type)
+        if result and result.get("games"):
+            games_vals = result["games"]
+            return _compute_stats(player_name, stat_type, line, games_vals, "WNBA")
+    except Exception:
+        pass
+    return None
+
+def _get_tennis_stats(player_name: str, stat_type: str, line: float) -> dict | None:
+    try:
+        from data.tennis_stats import get_player_stats as _tn
+        return _tn(player_name, stat_type, line)
+    except Exception:
+        return None
+
+def _get_soccer_stats(player_name: str, stat_type: str, line: float) -> dict | None:
+    try:
+        from data.soccer_stats import get_player_stats as _sc
+        return _sc(player_name, stat_type, line)
+    except Exception:
+        return None
+
+
+def _compute_stats(player: str, stat_type: str, line: float,
+                   values: list, sport: str) -> dict | None:
+    """Core stat computation given a list of recent values."""
+    if not values or len(values) < MIN_GAMES:
+        return None
+
+    n       = min(len(values), 10)
+    recent  = values[:n]
+    l3      = values[:3]
+    l5      = values[:min(5, len(values))]
+
+    avg_n  = sum(recent) / len(recent)
+    avg_l3 = sum(l3) / len(l3)
+    avg_l5 = sum(l5) / len(l5)
+
+    over_hits  = sum(1 for v in recent if v > line)
+    under_hits = sum(1 for v in recent if v < line)
+
+    direction  = "OVER" if avg_n > line else "UNDER"
+    hit_rate   = (over_hits / n) if direction == "OVER" else (under_hits / n)
+
+    # Trend: positive means player is trending toward direction
+    trend = (avg_l3 - avg_n) / (avg_n + 1e-9)
+    if direction == "UNDER":
+        trend = -trend  # invert: for UNDER, decreasing is good
+
+    return {
+        "player":        player,
+        "stat_type":     stat_type,
+        "line":          line,
+        "direction":     direction,
+        "avg":           round(avg_n, 2),
+        "avg_l3":        round(avg_l3, 2),
+        "avg_l5":        round(avg_l5, 2),
+        "hit_rate":      round(hit_rate, 3),
+        "over_hits":     over_hits,
+        "under_hits":    under_hits,
+        "n_games":       n,
+        "recent_values": recent[:8],
+        "trend":         round(trend, 3),
+        "sport":         sport,
+    }
+
+
+def get_stats_for_pick(pick: dict) -> dict | None:
+    """Route to the right stat module based on sport."""
+    sport  = pick["sport"]
+    player = pick["player"]
+    stat   = pick["stat_type"]
+    line   = pick["line"]
+
+    dispatchers = {
+        "NBA":    _get_nba_stats,
+        "WNBA":   _get_wnba_stats,
+        "MLB":    _get_mlb_stats,
+        "TENNIS": _get_tennis_stats,
+        "SOCCER": _get_soccer_stats,
+    }
+    fn = dispatchers.get(sport)
+    if fn is None:
+        return None
+    try:
+        return fn(player, stat, line)
+    except Exception as e:
+        _log(f"Stats failed {sport} {player} {stat}: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 3 — Score each pick
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_nba_def_ratings():
+    """Pre-warm the NBA def ratings cache via matchup_context module."""
+    try:
+        from data.matchup_context import _load_nba_def_ratings as _warm
+        _warm()
+    except Exception as e:
+        _log(f"NBA def ratings pre-warm failed: {e}")
+
+
+_NBA_PACE_CACHE: dict[str, float] = {}
+
+def _get_nba_team_pace(team_name: str) -> float | None:
+    """
+    Team pace (possessions/48 min) for 2025-26 playoffs/regular season.
+    League avg ~100. Cached in-process.
+    team_name is the full team name from context (e.g. "Boston Celtics").
+    """
+    global _NBA_PACE_CACHE
+    if not _NBA_PACE_CACHE:
+        # Always load Regular Season first (all 30 teams), then overlay Playoffs
+        for season_type in ["Regular+Season", "Playoffs"]:
+            try:
+                url = (f"https://stats.nba.com/stats/leaguedashteamstats"
+                       f"?Season=2025-26&SeasonType={season_type}"
+                       f"&MeasureType=Advanced&PerMode=PerGame"
+                       f"&PaceAdjust=N&PlusMinus=N&Rank=N&LeagueID=00"
+                       f"&Direction=DESC&Conference=&Division=&GameScope="
+                       f"&GameSegment=&LastNGames=0&Location=&Month=0"
+                       f"&OpponentTeamID=0&Outcome=&PORound=0&Period=0"
+                       f"&PlayerExperience=&PlayerPosition=&StarterBench=&TwoWay=0")
+                data = _get_json(url, NBA_HEADERS)
+                rs   = data["resultSets"][0]
+                hdrs = rs["headers"]
+                if "PACE" not in hdrs or "TEAM_NAME" not in hdrs:
+                    continue
+                pi = hdrs.index("PACE")
+                ni = hdrs.index("TEAM_NAME")
+                for row in rs["rowSet"]:
+                    name = row[ni]
+                    pace = row[pi]
+                    if name and pace:
+                        # Playoffs data overwrites Regular Season (more current)
+                        _NBA_PACE_CACHE[name.lower()] = float(pace)
+            except Exception:
+                continue
+
+    needle = team_name.lower()
+    if needle in _NBA_PACE_CACHE:
+        return _NBA_PACE_CACHE[needle]
+    # Fuzzy: last word match
+    last = needle.split()[-1] if needle else ""
+    for k, v in _NBA_PACE_CACHE.items():
+        if k.split()[-1] == last:
+            return v
+    return None
+
+
+def _get_nba_vegas_total(home_team: str, away_team: str) -> float | None:
+    """Pull NBA game total from The Odds API (same key as MLB)."""
+    api_key = os.getenv("ODDS_API_KEY", "")
+    if not api_key:
+        return None
+    cached, cpath = _cache(f"nba_odds_{home_team}_{away_team}", ttl=900)
+    if cached:
+        return cached.get("total")
+    try:
+        url  = (f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
+                f"?apiKey={api_key}&regions=us&markets=totals"
+                f"&oddsFormat=american&dateFormat=iso")
+        data = _get_json(url)
+        ht_last = home_team.lower().split()[-1]
+        at_last = away_team.lower().split()[-1]
+        for g in data:
+            gh = g.get("home_team", "").lower()
+            ga = g.get("away_team", "").lower()
+            if ht_last in gh and at_last in ga:
+                for bm in g.get("bookmakers", []):
+                    for mkt in bm.get("markets", []):
+                        if mkt["key"] == "totals":
+                            for o in mkt["outcomes"]:
+                                if o["name"] == "Over":
+                                    total = o.get("point")
+                                    _save(cpath, {"total": total})
+                                    return total
+    except Exception:
+        pass
+    return None
+
+_PITCHER_STAT_TYPES = {
+    "Pitcher Strikeouts", "Strikeouts", "Pitcher Fantasy Score",
+    "Pitching Outs", "Earned Runs Allowed", "Hits Allowed",
+    "Walks Allowed", "Pitches Thrown",
+}
+
+# Elite rim protectors: player last name → team name keywords
+# These players suppress opposing bigs' scoring/rebounding significantly
+_ELITE_RIM_PROTECTORS = {
+    "wembanyama": ["spurs", "san antonio"],
+    "gobert":     ["timberwolves", "minnesota"],
+    "kessler":    ["jazz", "utah"],
+    "lopez":      ["bucks", "milwaukee"],
+    "mobley":     ["cavaliers", "cleveland"],
+    "sengun":     ["rockets", "houston"],
+}
+
+# Stat types where rim protection meaningfully reduces production
+_RIM_AFFECTED_STATS = {
+    "Points", "Rebounds", "Blocks",
+    "Pts+Rebs", "Pts+Rebs+Asts", "Pts+Asts",
+}
+
+def _check_rim_protector(opp_team: str, stats: dict, stat_type: str) -> tuple[float, str]:
+    """
+    Returns (penalty, note). penalty < 1.0 when facing an elite rim protector.
+
+    Penalty severity scales with how inside-oriented the player is:
+      avg_reb >= 6  → big/center  → 0.83 penalty
+      avg_reb >= 4  → PF/forward  → 0.90 penalty
+      avg_reb < 4   → guard/wing  → 0.96 penalty (spacing still disrupted)
+    """
+    if not opp_team or opp_team == "unknown":
+        return 1.0, ""
+    if stat_type not in _RIM_AFFECTED_STATS:
+        return 1.0, ""
+
+    opp_lower = opp_team.lower()
+    for protector, keywords in _ELITE_RIM_PROTECTORS.items():
+        if any(kw in opp_lower for kw in keywords):
+            # Estimate player's role from rebound average in recent game logs
+            logs = stats.get("_raw_game_logs", [])
+            if logs:
+                reb_vals = [g.get("reb", 0) for g in logs[:10] if g.get("min", 0) >= 10]
+                avg_reb  = sum(reb_vals) / len(reb_vals) if reb_vals else 0
+            else:
+                avg_reb = stats.get("avg", 0) if stat_type == "Rebounds" else 3.0
+
+            if avg_reb >= 6:
+                return 0.83, f"⚠️ vs {protector.title()} — elite rim protection (big matchup)"
+            elif avg_reb >= 4:
+                return 0.90, f"⚠️ vs {protector.title()} — rim protection (forward matchup)"
+            else:
+                return 0.96, f"⚠️ vs {protector.title()} — rim protection (spacing disrupted)"
+
+    return 1.0, ""
+
+def _get_full_context(stats: dict, pick: dict) -> dict:
+    """
+    Get real matchup context: opponent quality, home/away, park factors, splits,
+    umpire tendency, pitch arsenal, lineup position, bullpen, Vegas totals.
+
+    MLB pitchers → get_pitcher_full_context (K-weighted, arsenal, umpire, bullpen)
+    MLB batters  → get_batter_full_context  (handedness splits, batting order, PA context)
+    NBA/WNBA     → matchup_context.get_context (defensive ratings, home/away splits)
+    """
+    sport     = pick["sport"]
+    stat_type = pick["stat_type"]
+
+    try:
+        if sport == "MLB":
+            if stat_type in _PITCHER_STAT_TYPES:
+                from data.mlb_advanced import get_pitcher_full_context
+                return get_pitcher_full_context(
+                    player_name = pick["player"],
+                    stat_type   = stat_type,
+                )
+            else:
+                # Batter prop — use batter-specific context
+                from data.mlb_advanced import get_batter_full_context
+                # Get pitcher hand from stats dict (already computed in mlb_batter_stats)
+                pitcher_hand = stats.get("pitcher_hand", "R")
+                batter_id    = None
+                try:
+                    from data.mlb_batter_stats import find_player_id
+                    pid = find_player_id(pick["player"])
+                    batter_id = int(pid) if pid else None
+                except Exception:
+                    pass
+                return get_batter_full_context(
+                    player_name  = pick["player"],
+                    stat_type    = stat_type,
+                    batter_id    = batter_id,
+                    pitcher_hand = pitcher_hand,
+                )
+        else:
+            from data.matchup_context import get_context
+            game_logs = stats.get("_raw_game_logs")
+            ctx = get_context(
+                sport       = sport,
+                player_name = pick["player"],
+                stat_type   = stat_type,
+                game_logs   = game_logs,
+                line        = pick["line"],
+            )
+            # Attach NBA Vegas total if we can identify the matchup
+            if sport == "NBA" and ctx.get("opp_team", "unknown") != "unknown":
+                try:
+                    game_logs_r = game_logs or []
+                    last_mu     = game_logs_r[0].get("matchup", "") if game_logs_r else ""
+                    # matchup like "BOS vs. LAL" → home=BOS, away=LAL (or "@")
+                    is_home = "vs." in last_mu
+                    my_abbr = last_mu.split(" vs.")[0].strip() if is_home else last_mu.split(" @")[0].strip()
+                    opp_name = ctx["opp_team"]
+                    home_t   = pick["player"] if is_home else opp_name  # approximate
+                    away_t   = opp_name if is_home else pick["player"]
+                    total    = _get_nba_vegas_total(home_t, away_t)
+                    if total:
+                        ctx.setdefault("components", {})["game_total"] = total
+                        ctx["description"].append(f"Game total: {total}")
+                except Exception:
+                    pass
+            return ctx
+    except Exception as e:
+        _log(f"Context failed {pick['player']}: {e}")
+        return {"context_score": 0.5, "description": [], "home_away": "unknown", "opp_team": "unknown"}
+
+def _injury_multiplier(player: str, sport: str) -> float:
+    """1.0 = healthy, 0.0 = out. Try ESPN injury report."""
+    try:
+        from data.injuries import get_injury_report
+        report = get_injury_report(sport.lower() if sport in ("NBA","WNBA") else "nba")
+        for inj in report:
+            if player.split()[-1].lower() in inj.get("player","").lower():
+                status = inj.get("status", "").lower()
+                if "out" in status:       return 0.0
+                if "doubtful" in status:  return 0.2
+                if "questionable" in status: return 0.7
+    except Exception:
+        pass
+    return 1.0
+
+def score_pick(stats: dict, pick: dict) -> dict:
+    """
+    Compute a composite 0–100 confidence score for a pick.
+
+    5 factors:
+      40% hit_rate   — how often they've hit this exact line historically
+      25% edge_size  — gap between player avg and PP line
+      15% trend      — L3 vs L8 trajectory
+      10% opponent   — opponent K rate / defensive rating / park factor / home-away
+      10% situational — injury status + data sample size
+    """
+    sport      = pick.get("sport", stats.get("sport", ""))
+    stat_type  = pick.get("stat_type", "")
+    hit_rate   = stats.get("hit_rate", 0)
+    avg        = stats.get("avg", 0)
+    line       = stats.get("line", 1)
+    trend      = stats.get("trend", 0)
+
+    # Hard gate: skip picks with less than 8% edge vs the line
+    edge_pct = abs(avg - line) / (line + 1e-9)
+    if edge_pct < MIN_EDGE_PCT:
+        result = {**pick, **stats}
+        result["confidence"] = 0.0
+        result["conf_pct"]   = 0
+        result["skip_reason"] = f"Edge too small ({edge_pct:.1%} < 8%)"
+        return result
+
+    # 1. Hit rate (20%)
+    hit_score = hit_rate
+
+    # 2. Recent form / trend (15%)
+    # Positive trend (L3 better than L8) = good; weight L3 vs L8
+    trend_score = max(0, min(1.0, 0.5 + trend))
+
+    # 3. Full matchup context (25%) — umpire, arsenal, handedness, opp K rate, park, home/away
+    ctx       = _get_full_context(stats, pick)
+    matchup_score = ctx.get("context_score", 0.5)
+
+    # 4. Environment (15%) — park factor + Vegas game total + weather + pace
+    comps      = ctx.get("components", {})
+    pf         = comps.get("park_factor", stats.get("park_factor", 1.0))
+    game_total = comps.get("game_total")
+
+    # Park factor
+    park_env = 0.5 + (1.0 - pf) * 1.5
+    park_env = max(0.1, min(0.9, park_env))
+
+    # Vegas total
+    vegas_env = 0.5
+    if game_total:
+        if sport == "MLB":
+            vegas_env = 0.5 + (8.5 - game_total) * 0.04   # low total = pitcher park
+        else:
+            vegas_env = 0.5 + (game_total - 215.0) * 0.002  # NBA: high total = pace-up
+        vegas_env = max(0.2, min(0.8, vegas_env))
+
+    # MLB weather (Open-Meteo, no API key needed)
+    weather_env = 0.5
+    weather_note = None
+    if sport == "MLB":
+        try:
+            from data.mlb_weather import get_park_weather
+            home_name = stats.get("home_name") or ctx.get("home_name", "")
+            if not home_name:
+                # derive from context: if player is home, their team is home
+                home_away = ctx.get("home_away", "")
+                opp_team  = ctx.get("opp_team", "")
+                # We don't always have home team name directly — use opp if away
+                # mlb_batter_stats puts home_name in the game dict but not the stats return
+                pass
+            # Also try game home_name from stats (added by mlb_batter_stats)
+            if not home_name:
+                home_name = stats.get("opp_team", "") if stats.get("home_away") == "away" else ""
+            w = get_park_weather(home_name) if home_name else None
+            if w and not w.get("is_dome"):
+                boost = w.get("over_boost", 0.0)
+                weather_env = 0.5 + boost * 10   # ±0.05 boost → ±0.5 on 0-1 scale
+                weather_env = max(0.2, min(0.8, weather_env))
+                if abs(boost) >= 0.02:
+                    weather_note = w.get("description", "")
+        except Exception:
+            pass
+
+    # NBA/WNBA pace adjustment
+    pace_env = 0.5
+    if sport in ("NBA", "WNBA"):
+        try:
+            opp_team = ctx.get("opp_team", "")
+            if opp_team and opp_team != "unknown":
+                pace = _get_nba_team_pace(opp_team)
+                if pace:
+                    # League avg ~100. Each +1 pace ≈ +1% counting stat volume
+                    pace_env = 0.5 + (pace - 100.0) * 0.01
+                    pace_env = max(0.3, min(0.7, pace_env))
+        except Exception:
+            pass
+        env_score = (park_env * 0.2 + vegas_env * 0.4 + pace_env * 0.4)
+    elif sport == "MLB":
+        env_score = (park_env * 0.35 + vegas_env * 0.35 + weather_env * 0.30)
+    else:
+        env_score = (park_env * 0.5 + vegas_env * 0.5)
+
+    # 5. Opportunity (10%) — lineup position, role, rest, data sample
+    inj_mult   = _injury_multiplier(pick["player"], pick["sport"])
+    n_games    = stats.get("n_games", MIN_GAMES)
+    data_conf  = min(1.0, n_games / 10)
+
+    # NBA/WNBA: hard skip reduced-minutes players — not enough role to trust the line
+    if sport in ("NBA", "WNBA") and stats.get("minutes_flag") == "reduced":
+        result = {**pick, **stats}
+        result["confidence"]  = 0.0
+        result["conf_pct"]    = 0
+        result["skip_reason"] = f"Minutes reduced in playoffs ({stats.get('playoff_min_avg', '?')}mpg) — line set on higher role"
+        return result
+
+    # NBA/WNBA rest days penalty (back-to-back = significant fatigue)
+    rest_mult = 1.0
+    if sport in ("NBA", "WNBA"):
+        rest_days = stats.get("rest_days")
+        if rest_days == 0:
+            rest_mult = 0.88   # back-to-back: ~12% performance drop
+        elif rest_days == 1:
+            rest_mult = 0.96   # one day rest: minor fatigue
+
+    opp_score = inj_mult * data_conf * rest_mult
+
+    # 6. Edge size (15%)
+    edge_score = min(1.0, edge_pct / 0.30)
+
+    # 7. Elite rim protector penalty — NBA/WNBA only
+    rim_note = ""
+    if sport in ("NBA", "WNBA"):
+        opp_team_ctx = ctx.get("opp_team", "unknown")
+        rim_penalty, rim_note = _check_rim_protector(opp_team_ctx, stats, stat_type)
+        if rim_penalty < 1.0:
+            matchup_score = matchup_score * rim_penalty
+            opp_score     = opp_score * rim_penalty   # fewer minutes/opportunity too
+            ctx.setdefault("description", []).append(rim_note)
+
+    # 8. Statcast quality_contact_score — MLB only, blended into matchup score
+    statcast_adj  = 0.0
+    statcast_note = ""
+    if sport == "MLB":
+        try:
+            from data.mlb_h2h import compute_statcast_quality_score
+            sc         = stats.get("statcast", {})
+            is_pitcher = pick.get("stat_type", "") in _PITCHER_STAT_TYPES
+            sc_result  = compute_statcast_quality_score(sc, is_pitcher=is_pitcher)
+            sc_quality = sc_result.get("quality_score", 0.5)
+            # Blend Statcast quality into matchup score (20% of matchup weight)
+            matchup_score = matchup_score * 0.80 + sc_quality * 0.20
+            statcast_adj  = round(sc_quality - 0.5, 3)
+            statcast_note = sc_result.get("note", "")
+        except Exception:
+            pass
+
+    # Weighted composite
+    composite = (
+        WEIGHTS["hit_rate"]    * hit_score     +
+        WEIGHTS["recent_form"] * trend_score   +
+        WEIGHTS["matchup"]     * matchup_score +
+        WEIGHTS["environment"] * env_score     +
+        WEIGHTS["opportunity"] * opp_score     +
+        WEIGHTS["edge_size"]   * edge_score
+    )
+
+    confidence = 0.50 + composite * 0.45
+    if inj_mult == 0:
+        confidence = 0.0
+
+    # Home/away splits — surface in output
+    splits    = ctx.get("splits", {})
+    home_away = ctx.get("home_away", "unknown")
+    split_avg = splits.get("home_avg") if home_away == "home" else splits.get("away_avg")
+    split_hr  = splits.get("home_hit_rate") if home_away == "home" else splits.get("away_hit_rate")
+
+    # H2H confidence adjustment (MLB only — baked into stats dict)
+    h2h_adj = 0.0
+    if sport == "MLB":
+        h2h_adj = stats.get("h2h_conf_adj", 0.0)
+        if h2h_adj != 0.0:
+            confidence = max(0.0, min(1.0, confidence + h2h_adj))
+
+    # ── Build projection drivers (ChatGPT recommendation) ─────────────────────
+    # Show which factors are pushing the score up or down and by how much.
+    drivers = []
+    neutral = 0.5
+
+    def _driver(label, score_val, weight):
+        lift = (score_val - neutral) * weight
+        pct  = int(abs(lift) * 100)
+        if pct < 2:
+            return  # skip tiny contributions
+        sign = "+" if lift > 0 else "−"
+        drivers.append((lift, f"{sign}{pct}% {label}"))
+
+    _driver(f"hit rate ({stats.get('over_hits',0) if stats.get('direction')=='OVER' else stats.get('under_hits',0)}/{stats.get('n_games',0)})",
+            hit_score, WEIGHTS["hit_rate"])
+    _driver(f"matchup ({ctx.get('opp_team','?').split()[-1]})",
+            matchup_score, WEIGHTS["matchup"])
+    _driver(f"edge (avg {stats.get('avg',0):.1f} vs line {stats.get('line',0)})",
+            edge_score, WEIGHTS["edge_size"])
+    _driver("recent form", trend_score, WEIGHTS["recent_form"])
+    _driver("environment", env_score, WEIGHTS["environment"])
+
+    if h2h_adj != 0:
+        sign = "+" if h2h_adj > 0 else "−"
+        drivers.append((h2h_adj, f"{sign}{int(abs(h2h_adj)*100)}% H2H history"))
+
+    if statcast_adj != 0 and abs(statcast_adj) >= 0.05:
+        sign = "+" if statcast_adj > 0 else "−"
+        label = statcast_note if statcast_note else "Statcast quality"
+        drivers.append((statcast_adj, f"{sign}{int(abs(statcast_adj)*100)}% {label}"))
+
+    drivers.sort(key=lambda x: -abs(x[0]))   # largest magnitude first
+    drivers_pos = [d for _, d in drivers if d.startswith("+")][:3]
+    drivers_neg = [d for _, d in drivers if d.startswith("−")][:2]
+
+    # NBA: compute vs-opponent avg from existing game logs
+    nba_vs_opp_avg = None
+    if pick.get("sport") in ("NBA", "WNBA"):
+        try:
+            opp_team = ctx.get("opp_team", "")
+            game_logs = stats.get("_raw_game_logs", [])
+            if game_logs and opp_team and opp_team != "unknown":
+                # Extract opponent abbreviation from matchup string (e.g. "BOS vs. LAL" → "LAL")
+                def _vs_opp_avg(logs, opp_name, stat_fn):
+                    opp_word = opp_name.split()[-1].upper()
+                    opp_abbr = opp_name if len(opp_name) <= 4 else ""
+                    matching = []
+                    for g in logs:
+                        mu = g.get("matchup", "")
+                        if opp_word in mu.upper() or (opp_abbr and opp_abbr in mu):
+                            v = stat_fn(g)
+                            if v is not None:
+                                matching.append(v)
+                    if len(matching) >= 2:
+                        return round(sum(matching) / len(matching), 1), len(matching)
+                    return None, 0
+
+                def _stat_v(g):
+                    st = pick.get("stat_type", "")
+                    if st == "Points":         return g.get("pts")
+                    if st == "Rebounds":       return g.get("reb")
+                    if st == "Assists":        return g.get("ast")
+                    if st in ("3-Pointers Made", "3PT Made"): return g.get("fg3m")
+                    if st == "Steals":         return g.get("stl")
+                    if st == "Blocks":         return g.get("blk")
+                    if st in ("Pts+Rebs+Asts", "Pts+Reb+Ast"):
+                        return (g.get("pts", 0) or 0) + (g.get("reb", 0) or 0) + (g.get("ast", 0) or 0)
+                    if st in ("Pts+Rebs", "Pts+Reb"):
+                        return (g.get("pts", 0) or 0) + (g.get("reb", 0) or 0)
+                    if st in ("Pts+Asts", "Pts+Ast"):
+                        return (g.get("pts", 0) or 0) + (g.get("ast", 0) or 0)
+                    return None
+
+                nba_vs_opp_avg, nba_vs_opp_n = _vs_opp_avg(game_logs, opp_team, _stat_v)
+        except Exception:
+            pass
+
+    # NBA Finals volatility discount — Finals defense/game-planning suppresses individual stats
+    # more than any model can price in. Raise effective threshold by applying a confidence haircut
+    # when a player has playoff games and the round is likely Finals (rest_days >= 7 between games).
+    finals_discount = False
+    if sport == "NBA":
+        pg   = stats.get("playoff_games", 0) or 0
+        rest = stats.get("rest_days", 0) or 0
+        if pg >= 14 and rest >= 6:
+            # Deep in playoffs with long rest between games → Finals cadence (2–4 day gaps)
+            confidence    = round(confidence * 0.88, 3)   # ~12% haircut
+            finals_discount = True
+
+    # Run projection engine for the projected stat value and edge %
+    try:
+        from projection_engine import project_pick
+        proj = project_pick(pick, stats, ctx)
+        # If projection gives a stronger edge signal, blend into confidence
+        if proj and not proj.get("skip") and proj.get("edge_pct") is not None:
+            proj_edge   = abs(proj["edge_pct"])
+            proj_conf   = proj.get("confidence", confidence * 100) / 100
+            # Blend: 60% scoring model, 40% projection engine
+            confidence  = round(confidence * 0.6 + proj_conf * 0.4, 3)
+    except Exception as e:
+        _log(f"Projection engine failed for {pick['player']}: {e}")
+        proj = {}
+
+    result = {**pick, **stats}
+    result["hit_score"]       = round(hit_score, 3)
+    result["edge_score"]      = round(edge_score, 3)
+    result["trend_score"]     = round(trend_score, 3)
+    result["opp_score"]       = round(opp_score, 3)
+    result["sit_score"]       = round(opp_score, 3)
+    result["composite"]       = round(composite, 3)
+    result["confidence"]      = round(confidence, 3)
+    result["conf_pct"]        = int(confidence * 100)
+    result["home_away"]       = home_away
+    result["opp_team"]        = ctx.get("opp_team", "unknown")
+    result["context_notes"]   = ctx.get("description", [])
+    result["split_avg"]       = split_avg
+    result["split_hit_rate"]  = split_hr
+    result["projection"]      = proj
+    result["nba_vs_opp_avg"]  = nba_vs_opp_avg
+    result["weather_note"]    = weather_note
+    result["rest_days"]       = stats.get("rest_days")
+    result["minutes_flag"]    = stats.get("minutes_flag")
+    result["drivers_pos"]     = drivers_pos
+    result["drivers_neg"]     = drivers_neg
+    result["statcast_note"]   = statcast_note
+    result["rim_note"]        = rim_note
+    result["playoff_games"]   = stats.get("playoff_games")
+    result["playoff_min_avg"] = stats.get("playoff_min_avg")
+    result["finals_discount"] = finals_discount
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4 — Build optimal parlays
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[dict]:
+    """
+    Build optimal parlays from scored picks.
+
+    Rules:
+    - Max 1 pick per game (no same-game correlation)
+    - Prefer picks from different sports (independence)
+    - Rank by expected value: P(all win) * payout - 1
+    """
+    # Filter to minimum confidence
+    eligible = [p for p in scored_picks if p["confidence"] >= MIN_CONF]
+    eligible.sort(key=lambda x: x["confidence"], reverse=True)
+
+    # Deduplicate by game: keep highest-confidence pick per game
+    by_game: dict[str, dict] = {}
+    for pick in eligible:
+        gid = pick.get("game_id", pick["player"])
+        if gid not in by_game or pick["confidence"] > by_game[gid]["confidence"]:
+            by_game[gid] = pick
+    pool = list(by_game.values())
+
+    parlays = []
+    for n_legs in range(2, min(max_legs + 1, len(pool) + 1)):
+        payout = PP_PAYOUTS.get(n_legs, 20)
+        be     = PP_BREAKEVEN.get(n_legs, 0.05)
+
+        best_ev = -999
+        best_combo = None
+        # Limit combos to top 20 picks to avoid explosion
+        top_pool = pool[:20]
+        for combo in itertools.combinations(top_pool, n_legs):
+            p_win = 1.0
+            for leg in combo:
+                p_win *= leg["confidence"]
+            ev = p_win * payout - 1.0   # expected return on $1
+
+            # Diversity bonus: picks from different sports are truly independent
+            sports_in = {leg["sport"] for leg in combo}
+            if len(sports_in) > 1:
+                ev *= 1.05   # 5% bonus for cross-sport
+
+            if ev > best_ev:
+                best_ev    = ev
+                best_combo = combo
+                best_p_win = p_win
+
+        if best_combo and best_ev > 0:
+            parlays.append({
+                "legs":     list(best_combo),
+                "n_legs":   n_legs,
+                "payout":   payout,
+                "p_win":    round(best_p_win, 3),
+                "ev":       round(best_ev, 3),
+                "ev_pct":   int(best_ev * 100),
+                "sports":   sorted({leg["sport"] for leg in best_combo}),
+            })
+
+    parlays.sort(key=lambda x: x["ev"], reverse=True)
+    return parlays
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 5 — Format and send notifications
+# ─────────────────────────────────────────────────────────────────────────────
+
+SPORT_EMOJI = {"NBA": "🏀", "MLB": "⚾", "WNBA": "🏀", "TENNIS": "🎾", "SOCCER": "⚽", "NHL": "🏒"}
+
+def _why_string(p: dict) -> str:
+    """One-line human reason for the pick."""
+    hits      = p["over_hits"] if p["direction"] == "OVER" else p["under_hits"]
+    n         = p["n_games"]
+    avg       = p["avg"]
+    line      = p["line"]
+    direction = p["direction"]
+    rec       = p.get("recent_values", [])[:5]
+    gap       = abs(avg - line)
+    gap_pct   = int(gap / (line + 1e-9) * 100)
+
+    trend_note = ""
+    if p.get("trend", 0) > 0.10:
+        trend_note = " · trending UP"
+    elif p.get("trend", 0) < -0.10:
+        trend_note = " · trending DOWN"
+
+    return (
+        f"{hits}/{n} games hit · avg {avg} vs line {line} "
+        f"({gap_pct}% gap) · L5: {rec}{trend_note}"
+    )
+
+def _format_push_body(top_picks: list[dict], top_parlay: dict | None) -> str:
+    lines = []
+    for p in top_picks[:5]:
+        arrow = "📈" if p["direction"] == "OVER" else "📉"
+        e     = SPORT_EMOJI.get(p["sport"], "🎯")
+        why   = _why_string(p)
+        lines.append(
+            f"{e}{arrow} {p['player']} {p['direction']} {p['line']} {p['stat_type']} ({p['conf_pct']}%)\n"
+            f"   {why}"
+        )
+
+    if top_parlay:
+        legs = " + ".join(
+            f"{l['player']} {l['direction']} {l['line']} {l['stat_type']}"
+            for l in top_parlay["legs"]
+        )
+        lines.append(
+            f"\n🎯 Best parlay ({top_parlay['n_legs']}-leg, {top_parlay['payout']}x):\n"
+            f"   {legs}\n"
+            f"   Win prob: {int(top_parlay['p_win']*100)}% | EV: +{top_parlay['ev_pct']}%"
+        )
+
+    return "\n".join(lines)
+
+def _format_discord_embed(top_picks: list[dict], parlays: list[dict]) -> dict:
+    """Build a rich Discord embed with full player names and clear reasoning."""
+    fields = []
+
+    # Top individual picks — full name, full stat, full reason
+    for p in top_picks[:8]:
+        arrow    = "📈" if p["direction"] == "OVER" else "📉"
+        e        = SPORT_EMOJI.get(p["sport"], "🎯")
+        conf_bar = "🟢" if p["confidence"] >= 0.75 else "🟡"
+        hits     = p["over_hits"] if p["direction"] == "OVER" else p["under_hits"]
+        n        = p["n_games"]
+        avg      = p["avg"]
+        line     = p["line"]
+        rec      = p.get("recent_values", [])[:5]
+        gap      = abs(avg - line)
+        gap_pct  = int(gap / (line + 1e-9) * 100)
+        l3_avg   = p.get("avg_l3", avg)
+        trend_arrow = "↗️" if p.get("trend", 0) > 0.10 else ("↘️" if p.get("trend", 0) < -0.10 else "➡️")
+
+        # Matchup context line
+        home_away   = p.get("home_away", "unknown")
+        opp_team    = p.get("opp_team", "")
+        ctx_notes   = p.get("context_notes", [])
+        split_avg   = p.get("split_avg")
+        split_hr    = p.get("split_hit_rate")
+        loc_emoji   = "🏠" if home_away == "home" else ("✈️" if home_away == "away" else "")
+        opp_str     = f" vs {opp_team}" if opp_team and opp_team != "unknown" else ""
+        split_str   = ""
+        if split_avg is not None and home_away != "unknown":
+            split_str = f" · {home_away.capitalize()} avg: **{split_avg}**"
+            if split_hr is not None:
+                split_str += f" ({int(split_hr*100)}% hit rate)"
+        ctx_str = " · ".join(ctx_notes[:2]) if ctx_notes else ""
+
+        # Projection engine output
+        proj       = p.get("projection", {})
+        projected  = proj.get("projected")
+        edge_pct   = proj.get("edge_pct_pct", gap_pct)
+        proj_str   = f"**{projected}** projected" if projected else f"**{avg}** avg"
+        factors_pos = proj.get("factors_pos", [])
+        factors_neg = proj.get("factors_neg", [])
+        factors_neu = proj.get("factors_neu", [])
+        all_factors = factors_pos + factors_neg + factors_neu
+
+        fields.append({
+            "name":  f"{e}{arrow} {p['player']} — {p['direction']} {p['line']} {p['stat_type']}",
+            "value": (
+                f"{conf_bar} **{p['conf_pct']}% confidence** · {p['sport']}\n"
+                f"📐 Line: **{line}** · {proj_str} · Edge: **{edge_pct}%**\n"
+                f"📊 Hit rate: **{hits}/{n}** past games · Avg: **{avg}** · L5: `{rec}`\n"
+                f"{loc_emoji} {home_away.capitalize()}{opp_str}{split_str}\n"
+                + ("\n".join(f"  {f}" for f in all_factors[:4]) if all_factors else "")
+            ).strip(),
+            "inline": False,
+        })
+
+    # Parlay recommendations — full names
+    if parlays:
+        for par in parlays[:3]:
+            leg_lines = []
+            for l in par["legs"]:
+                hits_l = l["over_hits"] if l["direction"] == "OVER" else l["under_hits"]
+                leg_lines.append(
+                    f"• {l['player']} {l['direction']} **{l['line']}** {l['stat_type']} "
+                    f"({hits_l}/{l['n_games']} hit, {l['conf_pct']}%)"
+                )
+            fields.append({
+                "name":  f"🎯 {par['n_legs']}-Leg Power Parlay — {par['payout']}x payout",
+                "value": (
+                    "\n".join(leg_lines) + "\n"
+                    f"**Win prob: {int(par['p_win']*100)}%** | "
+                    f"**EV: +{par['ev_pct']}%** | "
+                    f"Sports: {', '.join(par['sports'])}"
+                ),
+                "inline": False,
+            })
+
+    now_et = datetime.now(timezone.utc) - timedelta(hours=4)
+    ts     = now_et.strftime("%B %d, %Y at %I:%M %p ET")
+
+    return {
+        "embeds": [{
+            "title":       f"⚡ Power Parlay Report — {ts}",
+            "description": (f"**{len(top_picks)} edges found** across "
+                            f"{len({p['sport'] for p in top_picks})} sports. "
+                            f"Standard lines only. Best plays below."),
+            "color":       3066993,
+            "fields":      fields[:25],
+            "footer":      {
+                "text": (f"SharpLines · Hit rates from last "
+                         f"{max((p.get('n_games',5) for p in top_picks), default=5)} games · "
+                         f"Standard lines only")
+            },
+        }]
+    }
+
+def _send_notifications(top_picks: list[dict], parlays: list[dict]):
+    """Send push notification + Discord embeds."""
+    from notify import send_push, send_discord
+
+    top_parlay = parlays[0] if parlays else None
+    push_body  = _format_push_body(top_picks, top_parlay)
+    push_title = f"⚡ {len(top_picks)} edges | Best: {top_picks[0]['player']} {top_picks[0]['direction']} {top_picks[0]['line']} ({top_picks[0]['conf_pct']}%)" if top_picks else "Power Parlay Scan"
+
+    send_push(push_body, title=push_title)
+    _log("Push notification sent")
+
+    embed = _format_discord_embed(top_picks, parlays)
+    DISCORD_WEBHOOK_PREMIUM = os.getenv("DISCORD_WEBHOOK_PREMIUM", "")
+    DISCORD_WEBHOOK_FREE    = os.getenv("DISCORD_WEBHOOK_FREE", "")
+
+    if DISCORD_WEBHOOK_PREMIUM:
+        try:
+            resp = requests.post(DISCORD_WEBHOOK_PREMIUM, json=embed, timeout=10)
+            resp.raise_for_status()
+            _log("Discord premium sent")
+        except Exception as e:
+            _log(f"Discord premium failed: {e}")
+
+    # Free channel: same report with 60-min delay
+    import threading
+    def _delayed():
+        time.sleep(3600)
+        if DISCORD_WEBHOOK_FREE:
+            try:
+                requests.post(DISCORD_WEBHOOK_FREE, json=embed, timeout=10)
+                _log("Discord free (delayed) sent")
+            except Exception:
+                pass
+    threading.Thread(target=_delayed, daemon=True).start()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 6 — Deduplication: don't re-send picks within DEDUP_HOURS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _dedup_picks(picks: list[dict]) -> list[dict]:
+    """Filter out picks that were already sent in the last DEDUP_HOURS hours."""
+    sent    = _load_sent()
+    now_ts  = datetime.now(timezone.utc).timestamp()
+    cutoff  = now_ts - (DEDUP_HOURS * 3600)
+    new_sent = {k: v for k, v in sent.items() if v > cutoff}  # prune old
+
+    fresh = []
+    for p in picks:
+        key = f"{p['player']}|{p['stat_type']}|{p['game_id']}"
+        if new_sent.get(key, 0) < cutoff:
+            fresh.append(p)
+            new_sent[key] = now_ts
+
+    _save_sent(new_sent)
+    return fresh
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run(sports: list[str] = None, force: bool = False):
+    """
+    Full pipeline: fetch → score → parlay → notify.
+
+    sports: list of sport keys to scan. None = all.
+    force:  ignore dedup (re-send even if recently sent).
+    """
+    if sports is None:
+        sports = ["NBA", "MLB", "WNBA", "TENNIS", "SOCCER"]
+
+    _log(f"Starting power parlay scan: {', '.join(sports)}")
+
+    # Pre-load context data
+    _load_nba_def_ratings()
+
+    # 1. Fetch all standard lines
+    all_lines = fetch_standard_lines(sports)
+    _log(f"Total standard lines: {len(all_lines)}")
+
+    if not all_lines:
+        _log("No lines found — exiting")
+        return
+
+    # 2. Score every line
+    scored = []
+    for i, pick in enumerate(all_lines):
+        stats = get_stats_for_pick(pick)
+        if stats is None:
+            continue
+        if stats.get("n_games", 0) < MIN_GAMES:
+            continue
+        s = score_pick(stats, pick)
+        if s["confidence"] >= MIN_CONF:
+            scored.append(s)
+        # Progress log every 20 picks
+        if (i + 1) % 20 == 0:
+            _log(f"  Scored {i+1}/{len(all_lines)} lines, {len(scored)} qualified so far...")
+        time.sleep(0.05)  # light rate-limit respect
+
+    _log(f"Qualified picks: {len(scored)}")
+
+    if not scored:
+        _log("No qualified picks — nothing to send")
+        return
+
+    # 3. Sort by confidence
+    scored.sort(key=lambda x: x["confidence"], reverse=True)
+
+    # 4. Deduplicate (unless forced)
+    if not force:
+        scored = _dedup_picks(scored)
+        if not scored:
+            _log("All picks already sent recently — skipping notification")
+            return
+
+    # 5. Build parlays
+    parlays = build_parlays(scored)
+    _log(f"Parlays built: {len(parlays)}")
+
+    # 6. Log top picks
+    _log("=" * 60)
+    _log("TOP PICKS:")
+    for p in scored[:10]:
+        rec = str(p.get("recent_values", [])[:5])
+        _log(f"  {p['conf_pct']:3d}% | {p['sport']:6} | {p['player']:<24} "
+             f"{p['direction']:<5} {p['line']:<6} {p['stat_type']:<20} "
+             f"HR:{p['hit_rate']:.0%} Avg:{p['avg']} L5:{rec}")
+
+    if parlays:
+        _log("\nBEST PARLAYS:")
+        for par in parlays[:3]:
+            legs = " + ".join(f"{l['player']} {l['direction']} {l['line']}" for l in par["legs"])
+            _log(f"  {par['n_legs']}-leg ({par['payout']}x) | p_win={int(par['p_win']*100)}% | EV=+{par['ev_pct']}% | {legs}")
+    _log("=" * 60)
+
+    # 7. Send notifications
+    _send_notifications(scored[:8], parlays)
+    _log("Done.")
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sports",  nargs="+", default=None, help="Sports to scan")
+    parser.add_argument("--force",   action="store_true",     help="Skip dedup")
+    parser.add_argument("--dry-run", action="store_true",     help="Don't send notifications")
+    args = parser.parse_args()
+
+    if args.dry_run:
+        # Override notification functions
+        import notify as _n
+        _n.send_push = lambda *a, **kw: print("[DRY RUN] Push:", a)
+    run(sports=args.sports, force=args.force)
