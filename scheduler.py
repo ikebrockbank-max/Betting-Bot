@@ -46,6 +46,7 @@ def main():
     last_parlay_scan   = 0.0
     last_pp_report     = 0.0
     last_daily_digest  = ""     # date string "YYYY-MM-DD" of last digest
+    last_discord_results = ""  # date string "YYYY-MM-DD" of last results post
     injury_seen: dict  = {}     # in-memory dedup across iterations
     pp_injury_seen: dict = {}   # in-memory dedup for PP injury alerts
 
@@ -130,16 +131,19 @@ def main():
             except Exception:
                 log(f"ERROR during PP injury check:\n{traceback.format_exc()}")
 
-        # ── PP parlay builder (every PARLAY_SCAN_INTERVAL_MIN minutes) ────────
+        # ── Power parlay builder (every PARLAY_SCAN_INTERVAL_MIN minutes) ──────
+        # Uses scanner_power_parlay: zero-inflated MLB model, WNBA corrected
+        # game-log ordering, game-state correlation, calibrated p_over/p_under.
+        # Replaced old scanner_pp_parlay (edges.csv-based heuristic model).
         now = time.time()
         if now - last_parlay_scan >= PARLAY_SCAN_INTERVAL_MIN * 60:
             try:
-                import scanner_pp_parlay
-                importlib.reload(scanner_pp_parlay)
-                scanner_pp_parlay.run()
+                import scanner_power_parlay
+                importlib.reload(scanner_power_parlay)
+                scanner_power_parlay.run()
                 last_parlay_scan = time.time()
             except Exception:
-                log(f"ERROR during PP parlay scan:\n{traceback.format_exc()}")
+                log(f"ERROR during power parlay scan:\n{traceback.format_exc()}")
 
         # ── Pre-game PP parlay report — fires ~3hr before tip-off (every 30m) ─
         now = time.time()
@@ -165,6 +169,20 @@ def main():
                     last_daily_digest = today
             except Exception:
                 log(f"ERROR during daily digest:\n{traceback.format_exc()}")
+
+        # ── Discord results post — once per day at midnight ET (04:00 UTC) ────
+        # Posts yesterday's pick W/L to both Discord channels publicly
+        RESULTS_HOUR_UTC = 4  # midnight ET = 04:00 UTC
+        yesterday_str = (now_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        if now_dt.hour >= RESULTS_HOUR_UTC and last_discord_results != today:
+            try:
+                import discord_results
+                importlib.reload(discord_results)
+                discord_results.post_daily_results(target_date=yesterday_str)
+                last_discord_results = today
+                log("Discord daily results posted")
+            except Exception:
+                log(f"ERROR during discord results post:\n{traceback.format_exc()}")
 
         log(f"Sleeping {SCAN_INTERVAL_MIN}m until next scan...")
         time.sleep(SCAN_INTERVAL_MIN * 60)
