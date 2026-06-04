@@ -1311,9 +1311,10 @@ def score_pick(stats: dict, pick: dict) -> dict:
     result["wnba_h2h"]          = stats.get("wnba_h2h")
     result["home_split"]        = stats.get("home_split")
     result["away_split"]        = stats.get("away_split")
-    result["injury_note"]       = stats.get("injury_note", "")
-    result["injury_impact"]     = stats.get("injury_impact", {})
-    result["cal_note"]          = cal_note
+    result["injury_note"]              = stats.get("injury_note", "")
+    result["injury_impact"]            = stats.get("injury_impact", {})
+    result["injury_adjustment_source"] = stats.get("injury_impact", {}).get("injury_adjustment_source", "")
+    result["cal_note"]                 = cal_note
 
     return result
 

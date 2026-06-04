@@ -157,9 +157,13 @@ def _build_advanced_note(p: dict) -> str:
         cv = p.get("role_stability")
         if cv is not None and cv < 0.4:
             notes.append("⚠️ volatile mins")
-        # Injury impact boost
+        # Injury impact — show method so it's clear if boost is evidence-based
         inj_note = p.get("injury_note", "")
+        inj_src  = p.get("injury_adjustment_source", "")
         if inj_note:
+            # Replace generic emoji with WOWY indicator if available
+            if inj_src == "WOWY" and "📈" not in inj_note:
+                inj_note = inj_note.replace("🏥", "📈 WOWY")
             notes.append(inj_note)
 
     elif sport == "NBA":

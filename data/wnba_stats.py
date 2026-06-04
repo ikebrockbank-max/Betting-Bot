@@ -579,17 +579,24 @@ def get_player_stats(
 
         if player_team:
             injury_impact = get_team_injury_impact(
-                player_name    = player_name,
-                player_team    = player_team,
-                sport          = "WNBA",
-                player_avg_min = season_min,
+                player_name     = player_name,
+                player_team     = player_team,
+                sport           = "WNBA",
+                player_avg_min  = season_min,
+                player_game_log = full_games,   # pass actual game log for WOWY + priced-in detection
             )
             if injury_impact.get("has_impact"):
                 boost = injury_impact["minutes_boost"]
                 projected_minutes = round(projected_minutes + boost, 1)
                 injury_note = injury_impact["note"]
+            elif injury_impact.get("note"):
+                # Priced-in case: note it but don't boost
+                injury_note = injury_impact["note"]
     except Exception:
         pass
+
+    # Physical cap: WNBA games are 40 minutes — no player can project above 38
+    projected_minutes = min(38.0, projected_minutes)
 
     projected_stat = round(blended_rate * projected_minutes, 2)
 
