@@ -342,3 +342,30 @@ def pitcher_difficulty_multiplier(skill_score: float) -> float:
     deviation  = skill_score - 5.0
     raw        = 1.0 - deviation * 0.10
     return round(max(0.65, min(1.35, raw)), 3)
+
+
+def pitcher_sigma_multiplier(skill_score: float) -> float:
+    """
+    Scale factor for batter stat standard deviation (σ) based on pitcher quality.
+
+    Ace pitchers don't just lower expected output — they *also* compress the
+    distribution. Wheeler gives up fewer multi-hit games AND fewer HR spikes;
+    outcomes cluster closer to zero. A weak starter creates high-variance games:
+    more 0-for-4 days (batter swings over his head) AND more 3-hit explosions.
+
+    This makes σ conditional on matchup, not just batter history — the key
+    difference between a static estimator and a generative probabilistic model.
+
+    Slope: each 1.0 above average tightens σ by 6%.
+    Caps: [0.70, 1.35] — never compress below 70% or inflate above 135%.
+
+    Examples:
+      7.0 (Wheeler / ace)  → σ × 0.87  (tighter — consistent suppression)
+      6.0 (above avg)      → σ × 0.94
+      5.0 (average)        → σ × 1.00  (no change)
+      4.0 (below avg)      → σ × 1.06
+      3.0 (weak / callup)  → σ × 1.12  (wider — more extreme outcomes)
+    """
+    deviation = skill_score - 5.0
+    raw       = 1.0 - deviation * 0.06
+    return round(max(0.70, min(1.35, raw)), 3)

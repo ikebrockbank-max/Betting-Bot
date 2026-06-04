@@ -1387,6 +1387,21 @@ def score_pick(stats: dict, pick: dict) -> dict:
             if _pl is not None and _ph is not None:
                 _std = max(0.5, (_ph - _pl) / 2.0)
 
+        # ── Conditional σ for MLB batters ──────────────────────────────────────
+        # Ace pitchers don't just shift the mean — they also compress variance.
+        # Wheeler consistently suppresses: fewer multi-hit explosions, fewer
+        # surprise HR games. A weak starter creates wider distributions (more
+        # 0-for-4 AND more 3-hit blowups). Scale σ by pitcher quality so the
+        # probability engine reflects both the mean AND variance shift.
+        if _std and sport == "MLB" and stat_type not in _PITCHER_STAT_TYPES:
+            _ps = stats.get("pitcher_skill_score")
+            if _ps is not None:
+                try:
+                    from data.mlb_pitcher_strength import pitcher_sigma_multiplier as _psm
+                    _std = round(_std * _psm(float(_ps)), 3)
+                except Exception:
+                    pass
+
         if _std and _std > 0.3:
             _z      = (line - proj_stat_val) / _std
             _cdf    = 0.5 * (1 + _math.erf(_z / _math.sqrt(2)))
@@ -1396,9 +1411,7 @@ def score_pick(stats: dict, pick: dict) -> dict:
             # Blend distribution probability into confidence score.
             # WNBA: 55/45 — real per-minute projection, σ is calibrated and meaningful.
             # MLB batter: 65/35 — effective_avg as center is less precise, σ from
-            #   batter's own recent variance (stat_std_dev). Lower blend weight
-            #   because the projection center is a career/season average, not a
-            #   true minutes-based model.
+            #   batter's own recent variance (stat_std_dev), conditional on pitcher.
             if sport == "WNBA":
                 _p_model = p_over if direction == "OVER" else p_under
                 if 0.05 < _p_model < 0.95:
