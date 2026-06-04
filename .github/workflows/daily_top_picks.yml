@@ -1,0 +1,54 @@
+name: Daily Top Picks (11 AM PT)
+
+on:
+  schedule:
+    - cron: '0 18 * * *'   # 11:00 AM PT (18:00 UTC) every day
+  workflow_dispatch:        # Manual trigger from GitHub Actions UI
+    inputs:
+      force:
+        description: 'Force resend even if picks were recently sent'
+        required: false
+        default: 'false'
+
+jobs:
+  daily-picks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore state cache (dedup + stat caches)
+        uses: actions/cache@v4
+        with:
+          path: logs/
+          key: daily-picks-state-${{ github.run_id }}
+          restore-keys: |
+            daily-picks-state-
+            parlay-state-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Daily Top Picks
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          DISCORD_WEBHOOK_PREMIUM: ${{ secrets.DISCORD_WEBHOOK_PREMIUM }}
+          DISCORD_WEBHOOK_FREE: ${{ secrets.DISCORD_WEBHOOK_FREE }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+          KALSHI_PRIVATE_KEY_BASE64: ${{ secrets.KALSHI_PRIVATE_KEY_BASE64 }}
+        run: |
+          python3 daily_top_picks.py
+
+      - name: Save state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: logs/
+          key: daily-picks-state-${{ github.run_id }}
