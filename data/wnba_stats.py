@@ -252,7 +252,7 @@ def _build_game_log(
     """
     game_log: list[dict] = []
 
-    for event in reversed(events_flat):   # reversed = most-recent first
+    for event in events_flat:   # API returns most-recent first; do NOT reverse
         eid       = str(event.get("eventId", ""))
         raw_stats = event.get("stats", [])
         game      = dict(zip(labels, raw_stats))
