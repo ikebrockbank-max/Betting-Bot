@@ -105,8 +105,12 @@ def _load_player_ids() -> dict[str, str]:
         return {}
 
     players: dict[str, str] = {}
+    player_teams: dict[str, str] = {}   # player_name_lower → team displayName
+
     for team_entry in teams:
-        team_id = team_entry.get("team", {}).get("id")
+        team_data = team_entry.get("team", {})
+        team_id   = team_data.get("id")
+        team_name = team_data.get("displayName", team_data.get("name", ""))
         if not team_id:
             continue
         try:
@@ -119,14 +123,36 @@ def _load_player_ids() -> dict[str, str]:
                 name = athlete.get("fullName", athlete.get("displayName", "")).strip()
                 aid  = athlete.get("id", "")
                 if name and aid:
-                    players[name.lower()] = str(aid)
+                    players[name.lower()]       = str(aid)
+                    player_teams[name.lower()]  = team_name
         except Exception:
             continue
         time.sleep(0.15)
 
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CACHE_PATH.write_text(json.dumps({"date": today, "players": players}))
+    CACHE_PATH.write_text(json.dumps({
+        "date":         today,
+        "players":      players,
+        "player_teams": player_teams,
+    }))
     return players
+
+
+def _load_player_teams() -> dict[str, str]:
+    """Return {player_name_lower: team_displayName}. Built alongside player IDs."""
+    if CACHE_PATH.exists():
+        try:
+            cached = json.loads(CACHE_PATH.read_text())
+            return cached.get("player_teams", {})
+        except Exception:
+            pass
+    # Force rebuild by calling _load_player_ids()
+    _load_player_ids()
+    try:
+        cached = json.loads(CACHE_PATH.read_text())
+        return cached.get("player_teams", {})
+    except Exception:
+        return {}
 
 
 def _find_athlete_id(name: str, players: dict[str, str]) -> str | None:
@@ -534,10 +560,57 @@ def get_player_stats(
     l5_per_min     = (l5_avg / l5_min) if l5_min > 0 else stat_per_min
     # Blend: 60% recent rate, 40% season rate
     blended_rate   = l5_per_min * 0.60 + stat_per_min * 0.40
+
+    # ── Injury impact: check if key teammates are OUT ─────────────────────────
+    # When a high-minute teammate is OUT, our player absorbs a share of their minutes.
+    # This is the single largest source of unmodeled edge.
+    injury_impact  = {}
+    injury_note    = ""
+    minutes_before_inj = projected_minutes
+    try:
+        from data.injury_impact import get_team_injury_impact
+        # Look up player's team from roster cache (built during _load_player_ids)
+        player_team = ""
+        try:
+            team_map    = _load_player_teams()
+            player_team = team_map.get(player_name.lower().strip(), "")
+        except Exception:
+            pass
+
+        if player_team:
+            injury_impact = get_team_injury_impact(
+                player_name    = player_name,
+                player_team    = player_team,
+                sport          = "WNBA",
+                player_avg_min = season_min,
+            )
+            if injury_impact.get("has_impact"):
+                boost = injury_impact["minutes_boost"]
+                projected_minutes = round(projected_minutes + boost, 1)
+                injury_note = injury_impact["note"]
+    except Exception:
+        pass
+
     projected_stat = round(blended_rate * projected_minutes, 2)
-    # Uncertainty range: ±1 stdev of minutes × rate
-    proj_low  = round(blended_rate * max(0, projected_minutes - min_std_dev), 2)
-    proj_high = round(blended_rate * (projected_minutes + min_std_dev), 2)
+
+    # ── Dynamic error bands from calibration MAE ──────────────────────────────
+    # Use actual historical MAE from calibration_tracker if available.
+    # Fall back to ±1 stdev of minutes × rate if no calibration data yet.
+    error_band = None
+    try:
+        from calibration_tracker import get_stat_mae
+        error_band = get_stat_mae("WNBA", stat_type, min_n=8)
+    except Exception:
+        pass
+
+    if error_band is not None:
+        # Use actual model MAE for realistic range
+        proj_low  = round(max(0, projected_stat - error_band), 2)
+        proj_high = round(projected_stat + error_band, 2)
+    else:
+        # Fallback: ±1 stdev of minutes × blended rate
+        proj_low  = round(blended_rate * max(0, projected_minutes - min_std_dev), 2)
+        proj_high = round(blended_rate * (projected_minutes + min_std_dev), 2)
 
     # Usage proxy: avg FGA per game (field goal attempts = shot volume)
     fga_vals = [g.get("fga", 0) for g in full_games if g.get("fga", 0) > 0]
@@ -600,6 +673,10 @@ def get_player_stats(
         "home_split":         home_split,
         "away_split":         away_split,
         "opp_def":            opp_def,
+        # Injury impact
+        "injury_impact":      injury_impact,
+        "injury_note":        injury_note,
+        "minutes_before_inj": minutes_before_inj,
     }
 
     _sc[cache_key] = {"ts": time.time(), "data": result}

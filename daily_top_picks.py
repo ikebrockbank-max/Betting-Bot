@@ -157,6 +157,10 @@ def _build_advanced_note(p: dict) -> str:
         cv = p.get("role_stability")
         if cv is not None and cv < 0.4:
             notes.append("⚠️ volatile mins")
+        # Injury impact boost
+        inj_note = p.get("injury_note", "")
+        if inj_note:
+            notes.append(inj_note)
 
     elif sport == "NBA":
         vs_avg = p.get("nba_vs_opp_avg")
@@ -183,6 +187,9 @@ def _build_advanced_note(p: dict) -> str:
         rim = p.get("rim_note", "")
         if rim:
             notes.append(rim)
+        inj_note = p.get("injury_note", "")
+        if inj_note:
+            notes.append(inj_note)
 
     # MLB weather note
     if sport == "MLB":

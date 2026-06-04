@@ -541,6 +541,8 @@ def _get_wnba_stats(player_name: str, stat_type: str, line: float,
         computed["away_split"]         = result.get("away_split")
         computed["opp_def"]            = result.get("opp_def", {})
         computed["game_log"]           = result.get("game_log", [])
+        computed["injury_impact"]      = result.get("injury_impact", {})
+        computed["injury_note"]        = result.get("injury_note", "")
 
         # Override avg with projected_stat so edge_pct uses projection not raw avg
         proj = result.get("projected_stat")
@@ -1020,14 +1022,13 @@ def score_pick(stats: dict, pick: dict) -> dict:
     # 6. Edge size (15%)
     edge_score = min(1.0, edge_pct / 0.30)
 
-    # 7. Line movement signal — applies to all sports
+    # 7. Line movement signal — store adjustment, apply after confidence is computed
     line_movement_note = ""
+    _lm_adj = 0.0
     try:
         from line_tracker import line_movement_signal as _lms
-        lm_adj, line_movement_note = _lms(pick["player"], stat_type,
-                                          stats.get("direction", "OVER"))
-        if lm_adj != 0.0:
-            confidence = max(0.0, min(1.0, confidence + lm_adj))
+        _lm_adj, line_movement_note = _lms(pick["player"], stat_type,
+                                           stats.get("direction", "OVER"))
     except Exception:
         pass
 
@@ -1130,6 +1131,10 @@ def score_pick(stats: dict, pick: dict) -> dict:
     home_away = ctx.get("home_away", "unknown")
     split_avg = splits.get("home_avg") if home_away == "home" else splits.get("away_avg")
     split_hr  = splits.get("home_hit_rate") if home_away == "home" else splits.get("away_hit_rate")
+
+    # Apply line movement adjustment (computed above but deferred until confidence exists)
+    if _lm_adj != 0.0:
+        confidence = max(0.0, min(1.0, confidence + _lm_adj))
 
     # H2H confidence adjustment (MLB only — baked into stats dict)
     h2h_adj = 0.0
@@ -1241,6 +1246,33 @@ def score_pick(stats: dict, pick: dict) -> dict:
         _log(f"Projection engine failed for {pick['player']}: {e}")
         proj = {}
 
+    # ── Confidence calibration from historical results ────────────────────────
+    # When we have enough resolved picks in a bucket, blend toward the historical
+    # hit rate. This corrects systematic over/under-confidence.
+    # Blend weight scales with sample size: 0% at 0, ~50% at 50, max 70% at 100+.
+    cal_note = ""
+    try:
+        from calibration_tracker import get_calibration_adjustments
+        cal = get_calibration_adjustments(min_n=15)
+        if cal:
+            conf_pct_now = int(confidence * 100)
+            for label, cdata in cal.items():
+                lo, hi = map(int, label.split("-"))
+                if lo <= conf_pct_now < hi:
+                    hist_rate  = cdata["hist_rate"]
+                    n_bucket   = cdata["n"]
+                    blend      = min(0.70, n_bucket / 100)
+                    calibrated = round(confidence * (1 - blend) + hist_rate * blend, 3)
+                    delta_dir  = "↑" if calibrated > confidence else "↓"
+                    cal_note   = (
+                        f"Cal {delta_dir} {confidence:.0%}→{calibrated:.0%} "
+                        f"(hist {hist_rate:.0%}, n={n_bucket})"
+                    )
+                    confidence = calibrated
+                    break
+    except Exception:
+        pass
+
     result = {**pick, **stats}
     result["hit_score"]       = round(hit_score, 3)
     result["edge_score"]      = round(edge_score, 3)
@@ -1279,6 +1311,9 @@ def score_pick(stats: dict, pick: dict) -> dict:
     result["wnba_h2h"]          = stats.get("wnba_h2h")
     result["home_split"]        = stats.get("home_split")
     result["away_split"]        = stats.get("away_split")
+    result["injury_note"]       = stats.get("injury_note", "")
+    result["injury_impact"]     = stats.get("injury_impact", {})
+    result["cal_note"]          = cal_note
 
     return result
 

@@ -326,6 +326,91 @@ def calibration_report(min_picks: int = 5):
     print(f"\n{'='*60}\n")
 
 
+# ── Calibration adjustments (for confidence recalibration) ────────────────────
+
+def get_calibration_adjustments(min_n: int = 15) -> dict[str, dict]:
+    """
+    Return per-bucket calibration data so score_pick() can recalibrate confidence.
+
+    Returns:
+        {
+          "70-75": {"hist_rate": 0.58, "n": 22, "delta": -0.145},
+          "75-80": {"hist_rate": 0.71, "n": 18, "delta": -0.075},
+          ...
+        }
+    Only buckets with >= min_n resolved picks are included.
+    """
+    entries = [e for e in _load() if e.get("resolved") and e.get("actual") is not None]
+    if not entries:
+        return {}
+
+    BUCKETS = [(60, 70), (70, 75), (75, 80), (80, 85), (85, 90), (90, 100)]
+    result = {}
+    for lo, hi in BUCKETS:
+        bucket = [e for e in entries if lo <= e.get("conf_pct", 0) < hi]
+        if len(bucket) < min_n:
+            continue
+        hits = sum(1 for e in bucket if e["hit"])
+        hist_rate = hits / len(bucket)
+        midpoint  = (lo + hi) / 2 / 100
+        result[f"{lo}-{hi}"] = {
+            "hist_rate": round(hist_rate, 4),
+            "n":         len(bucket),
+            "delta":     round(hist_rate - midpoint, 4),  # positive = under-confident
+        }
+    return result
+
+
+def get_stat_mae(sport: str = None, stat_type: str = None, min_n: int = 8) -> float | None:
+    """
+    Return MAE (mean absolute projection error) for a sport/stat combination.
+
+    Used to set dynamic error bands on projections instead of ±1 stdev heuristic.
+    Falls back to None if insufficient data.
+
+    Example:
+        get_stat_mae("WNBA", "Rebounds") → 1.4  (model is off by 1.4 rebounds on avg)
+        get_stat_mae("WNBA", "Points")   → 3.1
+    """
+    entries = [
+        e for e in _load()
+        if e.get("resolved")
+        and e.get("proj_error") is not None
+        and (sport is None     or e.get("sport", "")     == sport)
+        and (stat_type is None or e.get("stat_type", "") == stat_type)
+    ]
+    if len(entries) < min_n:
+        return None
+
+    mae = sum(abs(e["proj_error"]) for e in entries) / len(entries)
+    return round(mae, 3)
+
+
+def get_all_stat_maes(sport: str = None, min_n: int = 8) -> dict[str, float]:
+    """
+    Return MAE for every stat type with sufficient data.
+    Useful for dynamic error bands across the board.
+    """
+    entries = [
+        e for e in _load()
+        if e.get("resolved")
+        and e.get("proj_error") is not None
+        and (sport is None or e.get("sport", "") == sport)
+    ]
+
+    by_stat: dict[str, list[float]] = {}
+    for e in entries:
+        st = e.get("stat_type", "")
+        if st:
+            by_stat.setdefault(st, []).append(abs(e["proj_error"]))
+
+    return {
+        st: round(sum(errs) / len(errs), 3)
+        for st, errs in by_stat.items()
+        if len(errs) >= min_n
+    }
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "update":
@@ -333,7 +418,23 @@ if __name__ == "__main__":
         update_results(date_arg)
     elif len(sys.argv) > 1 and sys.argv[1] == "report":
         calibration_report()
+    elif len(sys.argv) > 1 and sys.argv[1] == "calibration":
+        adj = get_calibration_adjustments(min_n=10)
+        if adj:
+            print("\nCalibration adjustments by bucket:")
+            for bucket, d in adj.items():
+                delta_str = f"+{d['delta']:.1%}" if d['delta'] > 0 else f"{d['delta']:.1%}"
+                flag = "🟢 under-confident" if d['delta'] > 0.05 else ("🔴 over-confident" if d['delta'] < -0.05 else "✅ well-calibrated")
+                print(f"  {bucket}%: actual {d['hist_rate']:.1%}  (n={d['n']}, delta={delta_str}) {flag}")
+        else:
+            print("Not enough resolved picks for calibration yet.")
+        maes = get_all_stat_maes()
+        if maes:
+            print("\nMAE by stat type:")
+            for st, mae in sorted(maes.items(), key=lambda x: -x[1]):
+                print(f"  {st}: ±{mae:.2f}")
     else:
         print("Usage:")
         print("  python3 calibration_tracker.py update [YYYY-MM-DD]")
         print("  python3 calibration_tracker.py report")
+        print("  python3 calibration_tracker.py calibration")
