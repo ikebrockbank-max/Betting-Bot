@@ -464,8 +464,20 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
     _SKEWED_STATS = {"Hitter Fantasy Score", "Total Bases", "Hits+Runs+RBIs",
                      "Singles", "Hits"}
     median_val   = round(_stat_mod.median(recent), 2) if stat_type in _SKEWED_STATS else None
-    # Standard deviation for the probability distribution engine (P(over)/P(under))
+    # Standard deviation for probability distribution engine (Gaussian fallback)
     stat_std_dev = round(_stat_mod.stdev(recent), 2) if len(recent) >= 4 else None
+
+    # ── Zero-inflated mixture model components ────────────────────────────────
+    # MLB batter distributions are NOT Gaussian — they are zero-inflated and
+    # right-skewed. Separating zero games from non-zero games lets us model the
+    # two components independently:
+    #   P(stat > line) = P(non-zero) × P(non-zero stat > line | non-zero game)
+    # The pitcher's zero_inflation_factor then shifts P(zero) by pitcher quality.
+    zero_game_count = sum(1 for v in recent if v == 0)
+    p_zero_game     = round(zero_game_count / len(recent), 3) if recent else 0.0
+    _nonzero_vals   = [v for v in recent if v > 0]
+    nonzero_mean    = round(sum(_nonzero_vals) / len(_nonzero_vals), 2) if _nonzero_vals else None
+    nonzero_std     = round(_stat_mod.stdev(_nonzero_vals), 2) if len(_nonzero_vals) >= 3 else None
 
     # ── Pitcher strength prior (opponent quality layer) ───────────────────────
     # Fetch a composite skill score for today's opposing pitcher so the batter
@@ -553,9 +565,13 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
         "park_factor":     ctx.get("park_factor", 1.0),
         "context_notes":   ctx.get("context_notes", []),
         "sport":           "MLB",
-        # Skewed-stat median + std dev for probability engine
+        # Skewed-stat median + std dev for probability engine (Gaussian fallback)
         "median_val":      median_val,
         "stat_std_dev":    stat_std_dev,
+        # Zero-inflated mixture model components
+        "p_zero_game":     p_zero_game,
+        "nonzero_mean":    nonzero_mean,
+        "nonzero_std":     nonzero_std,
         # Pitcher strength prior
         "pitcher_skill_score":   pitcher_skill.get("skill_score"),
         "pitcher_tier":          pitcher_tier,

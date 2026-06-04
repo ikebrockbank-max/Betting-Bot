@@ -344,6 +344,34 @@ def pitcher_difficulty_multiplier(skill_score: float) -> float:
     return round(max(0.65, min(1.35, raw)), 3)
 
 
+def pitcher_zero_inflation_factor(skill_score: float) -> float:
+    """
+    Multiplier applied to a batter's historical P(zero game) based on pitcher quality.
+
+    Elite pitchers generate more zero games (0-for-4, 0 fantasy score, etc.) —
+    not just because they're harder to hit, but because they consistently suppress
+    contact. Weak pitchers generate fewer zeros (more contact opportunities).
+
+    This is the correct way to encode pitcher quality in the distribution model:
+    instead of scaling σ independently (which can double-count with the mean shift),
+    we adjust P(zero game) and let that naturally propagate to both mean AND variance
+    of the mixture distribution.
+
+    Slope: 17.5% change in zero rate per skill unit from average.
+    Caps: [0.60, 1.80] — never reduce zeros below 60% or inflate above 180%.
+
+    Examples:
+      7.0 (ace / Wheeler)   → P(zero) × 1.37  (37% more zero games)
+      6.0 (above avg)       → P(zero) × 1.175
+      5.0 (average)         → P(zero) × 1.00  (no change)
+      4.0 (below avg)       → P(zero) × 0.825
+      3.0 (weak / callup)   → P(zero) × 0.65  (35% fewer zero games)
+    """
+    deviation = skill_score - 5.0
+    raw       = 1.0 + deviation * 0.175
+    return round(max(0.60, min(1.80, raw)), 3)
+
+
 def pitcher_sigma_multiplier(skill_score: float) -> float:
     """
     Scale factor for batter stat standard deviation (σ) based on pitcher quality.

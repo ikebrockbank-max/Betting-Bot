@@ -1387,36 +1387,76 @@ def score_pick(stats: dict, pick: dict) -> dict:
             if _pl is not None and _ph is not None:
                 _std = max(0.5, (_ph - _pl) / 2.0)
 
-        # ── Conditional σ for MLB batters ──────────────────────────────────────
-        # Ace pitchers don't just shift the mean — they also compress variance.
-        # Wheeler consistently suppresses: fewer multi-hit explosions, fewer
-        # surprise HR games. A weak starter creates wider distributions (more
-        # 0-for-4 AND more 3-hit blowups). Scale σ by pitcher quality so the
-        # probability engine reflects both the mean AND variance shift.
-        if _std and sport == "MLB" and stat_type not in _PITCHER_STAT_TYPES:
-            _ps = stats.get("pitcher_skill_score")
-            if _ps is not None:
-                try:
-                    from data.mlb_pitcher_strength import pitcher_sigma_multiplier as _psm
-                    _std = round(_std * _psm(float(_ps)), 3)
-                except Exception:
-                    pass
+        # ── Sport-specific probability computation ────────────────────────────
+        #
+        # WNBA: Gaussian Normal(projected_stat, σ) — per-minute projection is
+        #   the most direct estimate available; σ from calibration MAE.
+        #
+        # MLB batter: Zero-inflated mixture model — MLB outcomes are NOT Gaussian.
+        #   Two components:
+        #     1. Point mass at zero: P(zero game) — 0-for-4, 0 FS, 0 TB, etc.
+        #     2. Conditional distribution on non-zero games: right-skewed
+        #   P(stat > line) = P(non-zero) × P(non-zero stat > line | non-zero)
+        #   P(stat ≤ line) = P(zero) + P(non-zero) × P(non-zero stat ≤ line)
+        #
+        #   Pitcher quality adjusts P(zero) via zero_inflation_factor — this
+        #   simultaneously corrects both the mean AND variance without separate
+        #   σ scaling (which would double-count the same pitcher signal).
 
-        if _std and _std > 0.3:
-            _z      = (line - proj_stat_val) / _std
-            _cdf    = 0.5 * (1 + _math.erf(_z / _math.sqrt(2)))
+        if sport == "WNBA" and _std and _std > 0.3:
+            # Gaussian model — valid for WNBA per-minute projections
+            _z    = (line - proj_stat_val) / _std
+            _cdf  = 0.5 * (1 + _math.erf(_z / _math.sqrt(2)))
             p_over  = round(max(0.01, min(0.99, 1.0 - _cdf)), 3)
             p_under = round(max(0.01, min(0.99, _cdf)), 3)
+            _p_model = p_over if direction == "OVER" else p_under
+            if 0.05 < _p_model < 0.95:
+                confidence = round(confidence * 0.55 + _p_model * 0.45, 3)
 
-            # Blend distribution probability into confidence score.
-            # WNBA: 55/45 — real per-minute projection, σ is calibrated and meaningful.
-            # MLB batter: 65/35 — effective_avg as center is less precise, σ from
-            #   batter's own recent variance (stat_std_dev), conditional on pitcher.
-            if sport == "WNBA":
-                _p_model = p_over if direction == "OVER" else p_under
-                if 0.05 < _p_model < 0.95:
-                    confidence = round(confidence * 0.55 + _p_model * 0.45, 3)
-            elif sport == "MLB" and stat_type not in _PITCHER_STAT_TYPES:
+        elif sport == "MLB" and stat_type not in _PITCHER_STAT_TYPES:
+            p_zero_base  = float(stats.get("p_zero_game") or 0.0)
+            nonzero_mean = stats.get("nonzero_mean")
+            nonzero_std  = stats.get("nonzero_std")
+
+            if (p_zero_base > 0 and nonzero_mean is not None
+                    and nonzero_std and nonzero_std > 0.3):
+                # Adjust P(zero game) for pitcher quality
+                p_zero_adj = p_zero_base
+                _ps = stats.get("pitcher_skill_score")
+                if _ps is not None:
+                    try:
+                        from data.mlb_pitcher_strength import pitcher_zero_inflation_factor as _pzif
+                        p_zero_adj = min(0.85, p_zero_base * _pzif(float(_ps)))
+                    except Exception:
+                        pass
+                p_nonzero = 1.0 - p_zero_adj
+
+                # P(stat > line | non-zero game): Gaussian on non-zero component
+                _z_cond   = (line - nonzero_mean) / nonzero_std
+                _cdf_cond = 0.5 * (1 + _math.erf(_z_cond / _math.sqrt(2)))
+                _p_ov_nz  = max(0.005, min(0.995, 1.0 - _cdf_cond))
+                _p_un_nz  = max(0.005, min(0.995, _cdf_cond))
+
+                # Mixture: zero component + conditional non-zero component
+                p_over_raw  = p_nonzero * _p_ov_nz
+                p_under_raw = p_zero_adj + p_nonzero * _p_un_nz
+                _total = p_over_raw + p_under_raw
+                if _total > 0:
+                    p_over  = round(max(0.01, min(0.99, p_over_raw  / _total)), 3)
+                    p_under = round(max(0.01, min(0.99, p_under_raw / _total)), 3)
+
+            elif _std and _std > 0.3:
+                # Fallback: Gaussian when zero-inflated components unavailable
+                _z    = (line - proj_stat_val) / _std
+                _cdf  = 0.5 * (1 + _math.erf(_z / _math.sqrt(2)))
+                p_over  = round(max(0.01, min(0.99, 1.0 - _cdf)), 3)
+                p_under = round(max(0.01, min(0.99, _cdf)), 3)
+
+            # Blend into confidence at 35% — less than WNBA's 45% because
+            # effective_avg (the projection center) is a career average, not a
+            # true per-game model. The zero-inflated shape is more accurate than
+            # Gaussian, but the center is still a rough estimate.
+            if p_over is not None and p_under is not None:
                 _mlb_dir = stats.get("direction", "OVER")
                 _p_model = p_over if _mlb_dir == "OVER" else p_under
                 if 0.05 < _p_model < 0.95:
