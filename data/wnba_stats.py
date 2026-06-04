@@ -454,9 +454,13 @@ def get_player_stats(
     season_avg = sum(all_vals) / n
     season_min = sum(all_mins) / n
 
-    # Filter out garbage-time / rest games (< 60% of avg minutes)
-    rest_threshold = season_min * 0.60
-    full_games     = [g for g in game_log if g["minutes"] >= rest_threshold]
+    # Filter out true DNP / garbage-time appearances (< 8 absolute minutes).
+    # Previously used 60% of avg minutes, which silently dropped legitimate
+    # low-minute games (e.g. 17 min out of 30 avg) that PrizePicks counts.
+    # PrizePicks scores any game where the player appeared — we match that.
+    # 8-minute floor excludes only mop-up duty / injury exits, not real games.
+    MIN_MINUTES = 8
+    full_games  = [g for g in game_log if g["minutes"] >= MIN_MINUTES]
     if not full_games:
         full_games = game_log
 
