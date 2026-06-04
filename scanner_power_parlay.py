@@ -497,13 +497,24 @@ def _get_mlb_stats(player_name: str, stat_type: str, line: float) -> dict | None
 
 def _get_wnba_stats(player_name: str, stat_type: str, line: float) -> dict | None:
     # Use ESPN WNBA box scores (same approach as manual analysis)
-    # Search for player in recent games
     try:
         from data.wnba_stats import get_player_stats as _wnba
         result = _wnba(player_name, stat_type)
-        if result and result.get("games"):
-            games_vals = result["games"]
-            return _compute_stats(player_name, stat_type, line, games_vals, "WNBA")
+        if not result:
+            return None
+        # game_values = full filtered game log (most-recent first)
+        game_vals = result.get("game_values") or result.get("last_5", [])
+        if not game_vals:
+            return None
+        computed = _compute_stats(player_name, stat_type, line, game_vals, "WNBA")
+        if computed:
+            # Pass through minutes flag and per-36 context
+            computed["minutes_flag"]  = result.get("minutes_flag")
+            computed["season_min"]    = result.get("season_min")
+            computed["l5_min"]        = result.get("l5_min")
+            computed["season_per36"]  = result.get("season_per36")
+            computed["l5_per36"]      = result.get("l5_per36")
+        return computed
     except Exception:
         pass
     return None

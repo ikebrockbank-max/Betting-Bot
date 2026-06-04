@@ -276,6 +276,7 @@ def get_player_stats(
         "l10_avg":            round(l10_avg, 2),
         "l5_avg":             round(l5_avg, 2),
         "last_5":             fv[:5],
+        "game_values":        fv,        # full filtered game log (most-recent first)
         "games_played":       n,
         "rest_games_removed": n - nf,
         "season_min":         round(season_min, 1),
