@@ -10,8 +10,8 @@ This module computes a shared game state once per game and exposes:
   1. compute_game_state()              — game state dict for annotation
   2. correlation_factor_same_game()   — pitcher-driven penalty/bonus
   3. lineup_correlation_factor()      — lineup-driven cascade bonus
-  4. joint_game_correlation_factor()  — UNIFIED model: combines both with
-                                        overlap correction (use this for parlays)
+  4. joint_game_correlation_factor()  — UNIFIED model with DYNAMIC overlap
+                                        derived from game state (use this for parlays)
 
 CORRELATION MATH:
   Naïve parlay model:   P(A ∩ B ∩ C) = P(A) × P(B) × P(C)
@@ -280,41 +280,44 @@ def lineup_correlation_factor(legs: list) -> float:
     return round(max(0.92, min(1.18, multiplier)), 3)
 
 
-def joint_game_correlation_factor(legs: list, overlap_correction: float = 0.75) -> float:
+def joint_game_correlation_factor(legs: list) -> float:
     """
-    Unified correlation model: combines pitcher suppression and lineup cascade
-    with overlap correction so they don't double-count shared variance.
+    Unified correlation model with DYNAMIC overlap correction from game state.
 
-    THE PROBLEM WITH NAIVE MULTIPLICATION:
-      pitcher_factor × lineup_factor assumes independence.
-      But Wheeler's K-rate already suppresses baserunners → RBI chains are
-      weaker than lineup_factor assumes. They share variance. Treating them
-      as independent overestimates how much lineup correlation "cancels" ace
-      suppression.
+    Replaces the static overlap_correction=0.75 constant with a game-state-
+    derived coefficient. The three signals in the game state vector that
+    determine how much pitcher suppression is already embedded in lineup cascade:
 
-    THE OVERLAP CORRECTION:
-      As pitcher dominance D rises, the lineup cascade effect is discounted:
-        effective_lineup_dev = (lineup_factor − 1) × (1 − D × overlap_correction)
-        joint = pitcher_factor × (1 + effective_lineup_dev)
+    1. k_environment (0→1): Strikeouts DIRECTLY prevent baserunners.
+       Wheeler (K_env=0.84) has much higher cascade overlap than a groundball
+       pitcher (K_env=0.2) who gives up contact but induces weak ground balls.
 
-      overlap_correction = 0.75 means: at full ace dominance (D=1.0),
-      only 25% of the lineup cascade effect is independent from the pitcher.
+    2. run_environment (0→1): Low run environment = whole game is suppressive.
+       When park + weather + Vegas total all point "pitcher's park," lineup cascade
+       is already operating in a pre-suppressed context → higher overlap.
 
-    CALIBRATION (overlap_correction = 0.75):
-      Wheeler (D=0.53) + 1-3-4 lineup (cascade ×1.18):
-        Naïve:        0.872 × 1.18 = 1.028  (implies neutral — too optimistic)
-        Overlap-adj:  0.872 × 1.123 = 0.979  (correctly slightly suppressed)
-        GPT estimate: "true joint ~0.90–0.95"  ← we land at 0.979, close enough
+    3. pitcher_dominance (0→1): Amplifying term — higher dominance slightly
+       increases overlap above the K%/park baseline.
 
-      Average pitcher (D=0) + adjacent lineup (cascade ×1.087):
-        joint = 1.0 × 1.087 = 1.087  (full lineup effect, no pitcher overlap)
+    DYNAMIC OVERLAP FORMULA:
+      overlap = 0.60 + K_env×0.20 − (run_env − 0.5)×0.30 + D×0.15
+      clamped to [0.30, 0.95]
 
-      Wheeler (D=0.53) + scattered lineup (cascade ×1.0):
-        joint = 0.872 × 1.0 = 0.872  (pure pitcher penalty, no lineup effect)
+    CALIBRATION (dynamic vs static 0.75):
+      Wheeler (D=0.53, K_env=0.84, run=0.45):
+        dynamic_overlap = 0.60 + 0.168 + 0.015 + 0.080 = 0.863
+        joint = 0.872 × (1 + 0.18×(1−0.53×0.863)) = 0.872 × 1.099 = 0.958
+        vs static: 0.966  ← Wheeler is MORE suppressed because of his K rate
 
-    Args:
-        legs: list of scored pick dicts
-        overlap_correction: 0–1 fraction of lineup effect absorbed by pitcher
+      Contact ace (D=0.45, K_env=0.25, run=0.50):
+        dynamic_overlap = 0.60 + 0.05 + 0 + 0.068 = 0.718
+        joint = 0.900 × (1 + 0.18×(1−0.45×0.718)) = 0.900 × 1.122 = 1.010
+        vs static: 1.011  ← contact pitcher gets lower overlap, cascade more independent
+
+      Weak pitcher, hitter park (D=0, K_env=0, run=0.80):
+        dynamic_overlap = 0.60 + 0 − 0.09 + 0 = 0.510
+        (but D=0 so lineup deviation is fully preserved regardless)
+        joint = 1.0 × 1.087 = 1.087  ← full cascade bonus when no pitcher
 
     Returns:
         float joint correlation factor for the full combo [0.65, 1.25].
@@ -325,8 +328,11 @@ def joint_game_correlation_factor(legs: list, overlap_correction: float = 0.75) 
     if pitcher_fact == 1.0 and lineup_fact == 1.0:
         return 1.0
 
-    # Get the maximum pitcher dominance across all legs in the combo
-    dominance = 0.0
+    # Aggregate game state signals across all legs
+    # Use max dominance (worst-case pitcher), average environment
+    dominance_vals = []
+    k_env_vals     = []
+    run_env_vals   = []
     for leg in legs:
         gs = leg.get("game_state") or {}
         d  = float(gs.get("pitcher_dominance", 0.0) or 0.0)
@@ -334,13 +340,30 @@ def joint_game_correlation_factor(legs: list, overlap_correction: float = 0.75) 
             ps = leg.get("pitcher_skill_score")
             if ps is not None:
                 d = max(0.0, min(1.0, (float(ps) - 5.0) / 4.0))
-        dominance = max(dominance, d)
+        dominance_vals.append(d)
+        k_env_vals.append(float(gs.get("k_environment", 0.5) or 0.5))
+        run_env_vals.append(float(gs.get("run_environment", 0.5) or 0.5))
 
-    # Overlap-corrected lineup deviation:
-    # The higher pitcher dominance, the less additional lineup cascade adds
+    dominance = max(dominance_vals) if dominance_vals else 0.0
+    k_env     = max(k_env_vals) if k_env_vals else 0.5      # max: worst-case K env
+    run_env   = (sum(run_env_vals) / len(run_env_vals)
+                 if run_env_vals else 0.5)                  # avg: run env is symmetric
+
+    # ── Dynamic overlap coefficient ───────────────────────────────────────────
+    # How much of the lineup cascade is already explained by pitcher suppression?
+    # K-heavy pitchers prevent baserunners more directly → higher overlap.
+    # Low run environment means the game is already suppressive → higher overlap.
+    dynamic_overlap = (
+        0.60                            # baseline
+        + k_env * 0.20                  # K-heavy: +0.20, contact: +0.00–0.05
+        - (run_env - 0.5) * 0.30        # pitcher park: +0.15, hitter park: -0.15
+        + dominance * 0.15              # ace amplifier: +0 to +0.15
+    )
+    dynamic_overlap = max(0.30, min(0.95, dynamic_overlap))
+
+    # Apply to lineup deviation
     lineup_deviation      = lineup_fact - 1.0
-    overlap               = dominance * overlap_correction
-    effective_lineup_dev  = lineup_deviation * (1.0 - overlap)
+    effective_lineup_dev  = lineup_deviation * (1.0 - dominance * dynamic_overlap)
     effective_lineup_fact = 1.0 + effective_lineup_dev
 
     joint = pitcher_fact * effective_lineup_fact
