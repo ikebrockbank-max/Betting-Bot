@@ -241,9 +241,19 @@ def _build_game_log(
         except Exception:
             continue
 
+        # FGA as usage proxy (FG column = "made-att")
+        fga = 0.0
+        fg_raw = game.get("FG")
+        if fg_raw and "-" in str(fg_raw):
+            try:
+                fga = float(str(fg_raw).split("-")[1])
+            except Exception:
+                pass
+
         game_log.append({
             "value":     val,
             "minutes":   mins,
+            "fga":       fga,
             "date":      meta.get("date", ""),
             "opponent":  meta.get("opponent", ""),
             "home_away": meta.get("home_away", "unknown"),
@@ -485,26 +495,79 @@ def get_player_stats(
         except Exception:
             pass
 
+    # ── Minutes projection engine ──────────────────────────────────────────────
+    # Weighted: 50% L3, 30% L5, 20% season — recent minutes matter most
+    l3_min = sum(fm[:3]) / min(3, len(fm)) if fm else season_min
+    projected_minutes = round(l3_min * 0.50 + l5_min * 0.30 + season_min * 0.20, 1)
+
+    # Role stability: coefficient of variation on minutes
+    import statistics as _stats
+    min_std_dev = round(_stats.stdev(fm), 1) if len(fm) > 1 else 0.0
+    role_cv     = round(min_std_dev / season_min, 3) if season_min > 0 else 1.0
+    # cv < 0.15 = very stable role, 0.15–0.30 = moderate, > 0.30 = volatile
+    role_stability = max(0.0, min(1.0, 1.0 - role_cv * 2))
+
+    # Per-minute rate → projected stat
+    stat_per_min   = (season_avg / season_min) if season_min > 0 else 0.0
+    projected_stat = round(stat_per_min * projected_minutes, 2)
+    # Uncertainty range: ±1 stdev of minutes × per-min rate
+    proj_low  = round(stat_per_min * max(0, projected_minutes - min_std_dev), 2)
+    proj_high = round(stat_per_min * (projected_minutes + min_std_dev), 2)
+
+    # Usage proxy: avg FGA per game (field goal attempts = shot volume)
+    fga_vals = [g.get("fga", 0) for g in full_games if g.get("fga", 0) > 0]
+    usage_fga_per_game  = round(sum(fga_vals) / len(fga_vals), 1) if fga_vals else None
+    usage_fga_per_min   = round(sum(fga_vals) / sum(fm[:len(fga_vals)]), 3) if fga_vals and fm else None
+
+    # ── Rest days ──────────────────────────────────────────────────────────────
+    rest_days = None
+    if full_games and full_games[0].get("date"):
+        try:
+            last_date  = datetime.strptime(full_games[0]["date"], "%Y-%m-%d").date()
+            today_date = datetime.now(timezone.utc).date()
+            rest_days  = max(0, (today_date - last_date).days - 1)
+        except Exception:
+            pass
+
     result = {
-        "player_id":     athlete_id,
-        "season_avg":    round(season_avg, 2),
-        "l10_avg":       round(l10_avg, 2),
-        "l5_avg":        round(l5_avg, 2),
-        "last_5":        fv[:5],
-        "game_values":   fv,                 # full filtered values list
-        "game_log":      full_games,         # full metadata list
-        "games_played":  n,
-        "season_min":    round(season_min, 1),
-        "l5_min":        round(l5_min, 1),
-        "min_change_pct": round(min_change_pct, 3),
-        "minutes_flag":  minutes_flag,
-        "season_per36":  round(season_per36, 2),
-        "l5_per36":      round(l5_per36, 2),
-        "per36_change":  round(l5_per36 - season_per36, 2),
-        "h2h":           h2h,
-        "home_split":    home_split,
-        "away_split":    away_split,
-        "opp_def":       opp_def,
+        # Core averages
+        "player_id":          athlete_id,
+        "season_avg":         round(season_avg, 2),
+        "l10_avg":            round(l10_avg, 2),
+        "l5_avg":             round(l5_avg, 2),
+        "last_5":             fv[:5],
+        "game_values":        fv,
+        "game_log":           full_games,
+        "games_played":       n,
+        # Minutes
+        "season_min":         round(season_min, 1),
+        "l5_min":             round(l5_min, 1),
+        "l3_min":             round(l3_min, 1),
+        "projected_minutes":  projected_minutes,
+        "min_std_dev":        min_std_dev,
+        "role_cv":            role_cv,
+        "role_stability":     round(role_stability, 3),
+        "min_change_pct":     round(min_change_pct, 3),
+        "minutes_flag":       minutes_flag,
+        # Projection engine
+        "stat_per_min":       round(stat_per_min, 4),
+        "projected_stat":     projected_stat,
+        "proj_low":           proj_low,
+        "proj_high":          proj_high,
+        # Usage
+        "usage_fga_per_game": usage_fga_per_game,
+        "usage_fga_per_min":  usage_fga_per_min,
+        # Per-36
+        "season_per36":       round(season_per36, 2),
+        "l5_per36":           round(l5_per36, 2),
+        "per36_change":       round(l5_per36 - season_per36, 2),
+        # Rest
+        "rest_days":          rest_days,
+        # Matchup
+        "h2h":                h2h,
+        "home_split":         home_split,
+        "away_split":         away_split,
+        "opp_def":            opp_def,
     }
 
     _sc[cache_key] = {"ts": time.time(), "data": result}

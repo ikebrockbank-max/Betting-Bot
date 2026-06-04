@@ -516,16 +516,31 @@ def _get_wnba_stats(player_name: str, stat_type: str, line: float,
         if not computed:
             return None
         # Pass through all enriched context
-        computed["minutes_flag"]  = result.get("minutes_flag")
-        computed["season_min"]    = result.get("season_min")
-        computed["l5_min"]        = result.get("l5_min")
-        computed["season_per36"]  = result.get("season_per36")
-        computed["l5_per36"]      = result.get("l5_per36")
-        computed["wnba_h2h"]      = result.get("h2h")        # H2H vs today's opp
-        computed["home_split"]    = result.get("home_split")
-        computed["away_split"]    = result.get("away_split")
-        computed["opp_def"]       = result.get("opp_def", {})
-        computed["game_log"]      = result.get("game_log", [])
+        computed["minutes_flag"]       = result.get("minutes_flag")
+        computed["season_min"]         = result.get("season_min")
+        computed["l5_min"]             = result.get("l5_min")
+        computed["projected_minutes"]  = result.get("projected_minutes")
+        computed["min_std_dev"]        = result.get("min_std_dev")
+        computed["role_stability"]     = result.get("role_stability", 0.5)
+        computed["projected_stat"]     = result.get("projected_stat")
+        computed["proj_low"]           = result.get("proj_low")
+        computed["proj_high"]          = result.get("proj_high")
+        computed["stat_per_min"]       = result.get("stat_per_min")
+        computed["usage_fga_per_game"] = result.get("usage_fga_per_game")
+        computed["rest_days"]          = result.get("rest_days")
+        computed["season_per36"]       = result.get("season_per36")
+        computed["l5_per36"]           = result.get("l5_per36")
+        computed["wnba_h2h"]           = result.get("h2h")
+        computed["home_split"]         = result.get("home_split")
+        computed["away_split"]         = result.get("away_split")
+        computed["opp_def"]            = result.get("opp_def", {})
+        computed["game_log"]           = result.get("game_log", [])
+
+        # Override avg with projected_stat so edge_pct uses projection not raw avg
+        proj = result.get("projected_stat")
+        if proj is not None and proj > 0:
+            computed["avg"] = proj   # projection replaces avg as the primary signal
+
         return computed
     except Exception:
         pass
@@ -967,6 +982,16 @@ def score_pick(stats: dict, pick: dict) -> dict:
     n_games    = stats.get("n_games", MIN_GAMES)
     data_conf  = min(1.0, n_games / 10)
 
+    # WNBA: role stability factor — volatile minutes = lower confidence
+    if sport == "WNBA":
+        role_stab = stats.get("role_stability", 0.5)
+        # Blend role stability into opportunity score baseline
+        # role_stability of 1.0 = perfectly stable (32,33,31,34)
+        # role_stability of 0.0 = wildly variable (17,34,22,38)
+        opp_score_base = 0.5 + (role_stab - 0.5) * 0.4   # scales 0.3–0.7
+    else:
+        opp_score_base = 1.0
+
     # NBA/WNBA: hard skip reduced-minutes players — not enough role to trust the line
     if sport in ("NBA", "WNBA") and stats.get("minutes_flag") == "reduced":
         result = {**pick, **stats}
@@ -984,7 +1009,7 @@ def score_pick(stats: dict, pick: dict) -> dict:
         elif rest_days == 1:
             rest_mult = 0.96   # one day rest: minor fatigue
 
-    opp_score = inj_mult * data_conf * rest_mult
+    opp_score = inj_mult * data_conf * rest_mult * opp_score_base
 
     # 6. Edge size (15%)
     edge_score = min(1.0, edge_pct / 0.30)
@@ -1221,10 +1246,21 @@ def score_pick(stats: dict, pick: dict) -> dict:
     result["drivers_pos"]     = drivers_pos
     result["drivers_neg"]     = drivers_neg
     result["statcast_note"]   = statcast_note
-    result["rim_note"]        = rim_note
-    result["playoff_games"]   = stats.get("playoff_games")
-    result["playoff_min_avg"] = stats.get("playoff_min_avg")
-    result["finals_discount"] = finals_discount
+    result["rim_note"]          = rim_note
+    result["playoff_games"]     = stats.get("playoff_games")
+    result["playoff_min_avg"]   = stats.get("playoff_min_avg")
+    result["finals_discount"]   = finals_discount
+    # WNBA projection engine fields
+    result["projected_stat"]    = stats.get("projected_stat")
+    result["proj_low"]          = stats.get("proj_low")
+    result["proj_high"]         = stats.get("proj_high")
+    result["projected_minutes"] = stats.get("projected_minutes")
+    result["min_std_dev"]       = stats.get("min_std_dev")
+    result["role_stability"]    = stats.get("role_stability")
+    result["usage_fga_per_game"]= stats.get("usage_fga_per_game")
+    result["wnba_h2h"]          = stats.get("wnba_h2h")
+    result["home_split"]        = stats.get("home_split")
+    result["away_split"]        = stats.get("away_split")
 
     return result
 
