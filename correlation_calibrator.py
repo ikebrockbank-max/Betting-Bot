@@ -16,16 +16,34 @@ DATA FLOW:
 
   2. After each resolution, _form_pairs() runs: finds all previously resolved
      picks from the same game and records each pair as an observation.
-     Each pair stores: (bucket, p_a, p_b, both_hit).
+     Each pair stores: (bucket, p_a, p_b, hit_a, hit_b, both_hit).
 
   3. get_learned_joint_factor(legs): when called before building a parlay,
-     looks up the bucket for the current game state, computes
-       empirical_factor = observed_both_hit_rate / avg(p_a × p_b)
-     and returns it if min_pairs threshold is met.
+     looks up the bucket for the current game state, computes a
+     BIAS-CORRECTED empirical factor using empirical marginal rates as the
+     independence baseline (not raw model probabilities). Applies shrinkage
+     toward independence (1.0) to stabilize early-N estimates.
+     Returns it if min_pairs threshold is met.
 
   4. joint_game_correlation_factor() checks learned value first:
      → if available: use empirical factor
      → if not enough data: use dynamic formula (current behavior)
+
+BIAS CORRECTION (critical):
+  Naive formula:  empirical_factor = obs_joint_rate / mean(p_a × p_b)
+  Problem:        p_a and p_b are model outputs — if the model is
+                  overconfident (predicts 65%, actual hit rate is 58%),
+                  the denominator is inflated and the factor absorbs
+                  projection bias as if it were negative correlation.
+  Fix:            empirical_factor = obs_joint_rate / (obs_rate_a × obs_rate_b)
+                  where obs_rate_a/b are empirical marginal hit rates.
+                  This measures only *dependence*, not bias.
+
+SHRINKAGE (early-N stability):
+  At N=20 pairs, variance is enormous. A 50/50 blend toward independence
+  (1.0) stabilizes early estimates. Shrinkage fades as N grows:
+    α = min_pairs / (N + min_pairs)        → 0.50 at N=20
+    stable_factor = 1.0 × α + raw × (1-α)  → 0.25 at N=60, 0.17 at N=100
 
 CALIBRATION TIMELINE:
   Bucket scheme: 3 K-env levels × 2 dominance levels = 6 buckets
@@ -38,9 +56,10 @@ STATUS LEVELS:
   "calibrated"  — 4+ buckets with 20+ pairs, majority data-driven
 
 TRANSPARENCY:
-  get_calibration_summary() shows exactly how many picks/pairs exist,
-  which buckets are calibrated, and the learned vs formula gap per bucket.
-  This is the model's "confidence in its own confidence."
+  get_calibration_summary()  — how many pairs, which buckets calibrated
+  get_projection_bias()      — model calibration: predicted vs actual hit rate
+                               per bucket, showing whether model is over/under
+                               confident before the correlation correction.
 """
 
 import json
@@ -182,6 +201,8 @@ def _form_pairs(data: dict, game_id: str):
                 "p_a":        pick_a["p_hit"],
                 "p_b":        pick_b["p_hit"],
                 "p_product":  round(pick_a["p_hit"] * pick_b["p_hit"], 4),
+                "hit_a":      bool(pick_a["hit"]),   # individual outcomes stored
+                "hit_b":      bool(pick_b["hit"]),   # for bias-corrected denominator
                 "both_hit":   pick_a["hit"] and pick_b["hit"],
                 "directions": sorted([pick_a["direction"], pick_b["direction"]]),
                 "date":       datetime.now(timezone.utc).strftime("%Y-%m-%d"),
@@ -194,16 +215,30 @@ def get_learned_joint_factor(legs: list, min_pairs: int = 20) -> float | None:
     """
     Return the empirically learned joint factor for this combination, or None.
 
-    FORMULA:
-      observed_both_hit_rate = (pairs where both legs hit) / total_pairs
-      expected_independent   = mean(p_a × p_b) across pairs
-      empirical_factor       = observed / expected
+    BIAS-CORRECTED FORMULA:
+      Problem with naive approach (obs_joint / mean(p_a × p_b)):
+        If the model overestimates hit probability (e.g. predicts 65% but
+        legs actually hit 58%), the denominator is inflated — the factor
+        learns a downward correction that looks like negative correlation
+        but is actually just projection bias.
 
-      If empirical_factor > 1.0: legs hit together more than independence predicts.
-      If empirical_factor < 1.0: legs fail together more than independence predicts.
+      Fix — use empirical marginal hit rates as the independence baseline:
+        obs_rate_a     = actual hit rate for "a" picks in this bucket
+        obs_rate_b     = actual hit rate for "b" picks in this bucket
+        independence   = obs_rate_a × obs_rate_b
+        raw_factor     = obs_joint_rate / independence
 
-    Returns None when fewer than min_pairs exist for this bucket —
-    caller falls back to the dynamic formula.
+      This measures only *dependence*, not bias. get_projection_bias()
+      separately surfaces the model's over/under-confidence.
+
+    SHRINKAGE:
+      Early N=20-40 pairs have enormous variance. Blend toward independence
+      (1.0) using Bayesian shrinkage:
+        α = min_pairs / (N + min_pairs)    # 0.50 at N=20, 0.25 at N=60
+        stable = 1.0 × α + raw × (1-α)
+
+    Backward compatible: pairs without hit_a/hit_b fields fall back to
+    the naive p_product denominator with a conservative shrinkage penalty.
 
     Args:
         legs:       list of scored pick dicts (need game_state)
@@ -237,20 +272,102 @@ def get_learned_joint_factor(legs: list, min_pairs: int = 20) -> float | None:
     relevant = [p for p in pairs if p["directions"] == leg_dirs]
 
     if len(relevant) < min_pairs:
-        # Not enough direction-matched pairs; use all pairs with a slight penalty
+        # Not enough direction-matched pairs; use all pairs in bucket
         relevant = pairs
         if len(relevant) < min_pairs:
             return None
 
-    n_both_hit         = sum(1 for p in relevant if p["both_hit"])
-    obs_joint_rate     = n_both_hit / len(relevant)
-    avg_p_product      = sum(p["p_product"] for p in relevant) / len(relevant)
+    n = len(relevant)
+    obs_joint_rate = sum(1 for p in relevant if p["both_hit"]) / n
 
-    if avg_p_product < 0.01:
-        return None
+    # ── Bias-corrected independence baseline ──────────────────────────────────
+    # Use empirical marginal hit rates if individual outcomes are stored
+    # (new format: "hit_a" / "hit_b" fields present).
+    # This ensures the factor measures only *dependence*, not projection bias.
+    new_format_pairs = [p for p in relevant if "hit_a" in p and "hit_b" in p]
 
-    empirical_factor = obs_joint_rate / avg_p_product
-    return round(max(0.60, min(1.40, empirical_factor)), 3)
+    if len(new_format_pairs) >= min_pairs:
+        obs_rate_a = sum(p["hit_a"] for p in new_format_pairs) / len(new_format_pairs)
+        obs_rate_b = sum(p["hit_b"] for p in new_format_pairs) / len(new_format_pairs)
+        independence_baseline = max(0.01, obs_rate_a * obs_rate_b)
+        raw_factor = obs_joint_rate / independence_baseline
+        n_for_shrinkage = len(new_format_pairs)
+    else:
+        # Old-format pairs (no hit_a/hit_b): fall back to model p_product
+        # as denominator. Apply extra conservatism by treating N as halved.
+        avg_p_product = sum(p["p_product"] for p in relevant) / n
+        if avg_p_product < 0.01:
+            return None
+        raw_factor = obs_joint_rate / avg_p_product
+        n_for_shrinkage = n // 2   # conservative: treat old-format data as half weight
+
+    # ── Shrinkage toward independence (1.0) ───────────────────────────────────
+    # Stabilizes early estimates. At N=20: 50% prior, 50% data.
+    # Prior = 1.0 (assume independence until proven otherwise).
+    alpha = min_pairs / (n_for_shrinkage + min_pairs)
+    stable_factor = 1.0 * alpha + raw_factor * (1.0 - alpha)
+
+    return round(max(0.60, min(1.40, stable_factor)), 3)
+
+
+# ── Projection bias ───────────────────────────────────────────────────────────
+
+def get_projection_bias() -> dict:
+    """
+    Measure whether model probabilities are calibrated against actual outcomes.
+
+    WHY THIS MATTERS:
+      The correlation engine uses bias-corrected denominators (empirical
+      marginal rates vs model predictions). But knowing the *size* of the bias
+      is still useful — a model that's 10% overconfident on ace-pitcher games
+      needs more data to stabilize than one that's 2% off.
+
+    RETURNS per bucket (min 5 picks to compute):
+      avg_predicted:  mean model p_hit across resolved picks
+      avg_actual:     empirical hit rate (what actually happened)
+      bias:           avg_predicted / avg_actual
+                        > 1.0 → model overconfident (overestimates hit rate)
+                        < 1.0 → model underconfident
+                        = 1.0 → calibrated
+      calibration:    "overconfident" | "underconfident" | "calibrated" (±5% band)
+
+    Example: high_K|ace shows bias=1.18 → model predicts 64% but legs only
+    hit 54% vs aces. Correlation factor correctly uses 54%, not 64%, as baseline.
+    """
+    data  = _load()
+    picks = data.get("picks", {})
+
+    bucket_data: dict = {}
+    for pick in picks.values():
+        b = pick.get("bucket", "unknown")
+        if b not in bucket_data:
+            bucket_data[b] = {"p_hits": [], "actuals": []}
+        bucket_data[b]["p_hits"].append(float(pick.get("p_hit", 0.5) or 0.5))
+        bucket_data[b]["actuals"].append(1.0 if pick.get("hit") else 0.0)
+
+    result: dict = {}
+    for b, d in bucket_data.items():
+        n = len(d["p_hits"])
+        if n < 5:
+            continue
+        avg_p      = sum(d["p_hits"]) / n
+        avg_actual = sum(d["actuals"]) / n
+        bias       = round(avg_p / max(0.01, avg_actual), 3)
+        if avg_p > avg_actual + 0.05:
+            cal = "overconfident"
+        elif avg_p < avg_actual - 0.05:
+            cal = "underconfident"
+        else:
+            cal = "calibrated"
+        result[b] = {
+            "n_picks":       n,
+            "avg_predicted": round(avg_p, 3),
+            "avg_actual":    round(avg_actual, 3),
+            "bias":          bias,
+            "calibration":   cal,
+        }
+
+    return result
 
 
 # ── Calibration status ────────────────────────────────────────────────────────
@@ -296,14 +413,26 @@ def get_calibration_summary() -> dict:
     else:
         status = "calibrated"
 
+    # Projection bias summary (how well model probs match actual hit rates)
+    bias_summary = get_projection_bias()
+    overconfident_buckets = [
+        b for b, v in bias_summary.items() if v["calibration"] == "overconfident"
+    ]
+
     return {
-        "total_picks_resolved": total_picks,
-        "total_pairs_observed": total_pairs,
+        "total_picks_resolved":  total_picks,
+        "total_pairs_observed":  total_pairs,
         "pairs_needed_per_bucket": min_thresh,
-        "buckets_calibrated":   n_calibrated,
-        "buckets_total":        6,
-        "bucket_counts":        bucket_counts,
-        "bucket_factors":       bucket_factors,   # empirical when available
-        "status":               status,
-        "pct_complete":         round(min(100, total_pairs / (min_thresh * 6) * 100), 1),
+        "buckets_calibrated":    n_calibrated,
+        "buckets_total":         6,
+        "bucket_counts":         bucket_counts,
+        "bucket_factors":        bucket_factors,    # empirical when available
+        "status":                status,
+        "pct_complete":          round(min(100, total_pairs / (min_thresh * 6) * 100), 1),
+        # Bias correction transparency
+        "projection_bias":       bias_summary,      # per-bucket predicted vs actual
+        "overconfident_buckets": overconfident_buckets,
+        "bias_correction_active": any(                # True once we have enough picks
+            v["n_picks"] >= 20 for v in bias_summary.values()
+        ),
     }
