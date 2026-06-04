@@ -1535,6 +1535,9 @@ def score_pick(stats: dict, pick: dict) -> dict:
     result["median_val"]               = stats.get("median_val")
     # Game-level latent state (shared by all players in the same MLB game)
     result["game_state"]               = game_state
+    # Lineup context (for lineup correlation model)
+    result["batting_order"]            = stats.get("batting_order")
+    result["player_team"]              = stats.get("player_team", "")
 
     return result
 
@@ -1598,11 +1601,15 @@ def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[
             by_game[gid] = pick
     pool = list(by_game.values())
 
-    # Import correlation module once outside the loop
+    # Import correlation modules once outside the loop
     try:
         from data.mlb_game_state import correlation_factor_same_game as _corr_fn
     except Exception:
         _corr_fn = None
+    try:
+        from data.mlb_game_state import lineup_correlation_factor as _lineup_corr_fn
+    except Exception:
+        _lineup_corr_fn = None
 
     parlays = []
     for n_legs in range(2, min(max_legs + 1, len(pool) + 1)):
@@ -1622,15 +1629,28 @@ def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[
             for leg in combo:
                 p_win *= _get_p_hit(leg)
 
-            # ── Same-game correlation adjustment ─────────────────────────────
-            # Legs from the same MLB game share a pitcher/game-state risk factor.
-            # They are NOT independent: if Wheeler dominates, ALL opposing batter
-            # legs fail together. Apply a joint-probability discount proportional
-            # to pitcher dominance and direction (OVER vs UNDER stacks).
+            # ── Correlation adjustment (pitcher + lineup) ─────────────────────
+            # Two independent correlation sources:
+            #
+            # 1. Pitcher-driven (downside): ace suppresses all opposing batters
+            #    → OVER stacks in ace games discounted (legs fail together)
+            #
+            # 2. Lineup-driven (upside): adjacent same-team batters benefit from
+            #    offensive chain reactions (leadoff gets on → cleanup gets RBI)
+            #    → OVER stacks in heart of order get a bonus (cascade effect)
+            #
+            # These multiply: a same-team 1-2-3 lineup stack facing a weak pitcher
+            # gets the lineup bonus but no pitcher penalty. A cross-game stack gets
+            # neither adjustment. A same-game ace stack gets only the pitcher penalty.
             corr_factor = 1.0
             if _corr_fn is not None:
                 try:
-                    corr_factor = _corr_fn(list(combo))
+                    corr_factor *= _corr_fn(list(combo))
+                except Exception:
+                    pass
+            if _lineup_corr_fn is not None:
+                try:
+                    corr_factor *= _lineup_corr_fn(list(combo))
                 except Exception:
                     pass
             p_win_adj = p_win * corr_factor
@@ -1651,10 +1671,14 @@ def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[
 
         if best_combo and best_ev >= MIN_EV:
             corr_note = ""
-            if best_corr < 0.97:
-                corr_note = f"⚠️ Same-game correlation penalty ×{best_corr:.2f}"
+            if best_corr < 0.93:
+                corr_note = f"⚠️ Correlation penalty ×{best_corr:.2f} (same-game ace suppression)"
+            elif best_corr < 0.97:
+                corr_note = f"⚠️ Correlation penalty ×{best_corr:.2f}"
+            elif best_corr > 1.06:
+                corr_note = f"✅ Lineup cascade bonus ×{best_corr:.2f} (adjacent batting positions)"
             elif best_corr > 1.02:
-                corr_note = f"✅ Same-game correlation bonus ×{best_corr:.2f}"
+                corr_note = f"✅ Correlation bonus ×{best_corr:.2f}"
 
             # Per-leg breakdown for output
             leg_breakdown = []

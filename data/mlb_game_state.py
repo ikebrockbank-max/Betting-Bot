@@ -162,3 +162,101 @@ def correlation_factor_same_game(legs: list) -> float:
             multiplier *= max(0.88, 1.0 - discount)
 
     return round(multiplier, 3)
+
+
+# ── Stat types that chain through the lineup ──────────────────────────────────
+# When a leadoff hitter gets on base, cleanup hitters gain RBI opportunities.
+# These stat types have strong positive within-team correlation because they
+# depend on teammate action (baserunners for RBI, being on base for Runs).
+_CHAIN_STATS = {"RBI", "Runs", "Hits", "Hits+Runs+RBIs", "Hitter Fantasy Score",
+                "Total Bases", "Singles"}
+
+
+def lineup_correlation_factor(legs: list) -> float:
+    """
+    Compute a joint probability bonus for same-team batter OVER stacks
+    based on batting order proximity.
+
+    The "offensive cascade" effect: if the 2-hitter reaches base, the 3-4
+    hitters get RBI chances. Hot team offense creates chain reactions across
+    adjacent lineup slots. This is the *upside* correlation your system was
+    missing — the pitcher model catches downside, this catches upside.
+
+    Rules:
+      Same team + adjacent positions (diff ≤ 2):   strong bonus → ×1.04–1.09
+      Same team + heart of order (both 1–4):        amplified
+      RBI/R/H chain stats (both):                   amplified
+      UNDER–OVER mixed same team:                    slight penalty
+      Different teams / no order data:               neutral (1.0)
+
+    Caps: [0.95, 1.18] — never inflate or deflate more than this.
+
+    Args:
+        legs: list of scored pick dicts (need: player_team, batting_order,
+              direction, stat_type)
+
+    Returns:
+        float multiplier on joint P(all legs win).
+    """
+    # Group legs by player team
+    teams: dict[str, list] = {}
+    for i, leg in enumerate(legs):
+        team = (leg.get("player_team") or "").strip()
+        if not team:
+            continue
+        teams.setdefault(team, []).append(leg)
+
+    multiplier = 1.0
+
+    for team, team_legs in teams.items():
+        if len(team_legs) < 2:
+            continue
+
+        # Pairwise lineup correlation
+        for i in range(len(team_legs)):
+            for j in range(i + 1, len(team_legs)):
+                leg_i = team_legs[i]
+                leg_j = team_legs[j]
+                dir_i = leg_i.get("direction", "OVER")
+                dir_j = leg_j.get("direction", "OVER")
+                ord_i = leg_i.get("batting_order")
+                ord_j = leg_j.get("batting_order")
+
+                # Position proximity: 0 = batting right next to each other
+                # diff ≤ 2: adjacent (strong), 3–4: moderate, 5+: weak
+                if ord_i is not None and ord_j is not None:
+                    pos_diff   = abs(ord_i - ord_j)
+                    proximity  = max(0.0, 1.0 - pos_diff / 6.0)
+                    # Heart of order bonus: both 1–4 are the run-producing core
+                    both_heart = (1 <= ord_i <= 4 and 1 <= ord_j <= 4)
+                    heart_amp  = 1.25 if both_heart else 1.0
+                else:
+                    # No batting order data — use weaker team-level correlation
+                    proximity  = 0.35
+                    heart_amp  = 1.0
+
+                # Stat chain amplifier: RBI/R/H stats depend on teammates
+                stat_i = leg_i.get("stat_type", "")
+                stat_j = leg_j.get("stat_type", "")
+                chain_amp = 1.20 if (stat_i in _CHAIN_STATS and stat_j in _CHAIN_STATS) else 1.0
+
+                # Effective correlation strength for this pair
+                strength = proximity * heart_amp * chain_amp
+
+                if dir_i == "OVER" and dir_j == "OVER":
+                    # OVER stack: offensive cascade bonus
+                    # Max bonus ~9% for adjacent heart-of-order RBI/FS pair
+                    bonus      = strength * 0.07
+                    multiplier *= min(1.18, 1.0 + bonus)
+
+                elif dir_i == "UNDER" and dir_j == "UNDER":
+                    # UNDER stack: correlation helps slightly (cold team = everyone under)
+                    bonus      = strength * 0.025
+                    multiplier *= min(1.08, 1.0 + bonus)
+
+                else:
+                    # Mixed OVER/UNDER same team: conflicting game-state signals
+                    penalty    = strength * 0.02
+                    multiplier *= max(0.95, 1.0 - penalty)
+
+    return round(max(0.92, min(1.18, multiplier)), 3)

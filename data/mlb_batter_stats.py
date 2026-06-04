@@ -374,7 +374,8 @@ def _find_player_game(player_name: str) -> dict | None:
                         "opp_pitcher_id": g.get("home_pitcher_id"),
                         "home_name": g["home_name"], "home_id": g["home_id"],
                         "ump_name": g.get("ump_name",""), "is_home": False,
-                        "batting_order": order}
+                        "batting_order": order,
+                        "player_team": g.get("away_name", "")}
         for order, bname in g.get("home_lineup", []):
             if name_lower in _normalize(bname).lower():
                 return {"opp_id": g["away_id"], "opp_name": g["away_name"],
@@ -382,7 +383,8 @@ def _find_player_game(player_name: str) -> dict | None:
                         "opp_pitcher_id": g.get("away_pitcher_id"),
                         "home_name": g["home_name"], "home_id": g["home_id"],
                         "ump_name": g.get("ump_name",""), "is_home": True,
-                        "batting_order": order}
+                        "batting_order": order,
+                        "player_team": g.get("home_name", "")}
     return None
 
 def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | None:
@@ -565,6 +567,9 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
         "park_factor":     ctx.get("park_factor", 1.0),
         "context_notes":   ctx.get("context_notes", []),
         "sport":           "MLB",
+        # Lineup context (for correlation model)
+        "batting_order":   game.get("batting_order") if game else None,
+        "player_team":     game.get("player_team", "") if game else "",
         # Skewed-stat median + std dev for probability engine (Gaussian fallback)
         "median_val":      median_val,
         "stat_std_dev":    stat_std_dev,
