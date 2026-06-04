@@ -1601,7 +1601,14 @@ def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[
             by_game[gid] = pick
     pool = list(by_game.values())
 
-    # Import correlation modules once outside the loop
+    # Import unified correlation model once outside the loop.
+    # joint_game_correlation_factor() combines pitcher suppression + lineup
+    # cascade with overlap correction so they don't double-count shared variance.
+    try:
+        from data.mlb_game_state import joint_game_correlation_factor as _joint_corr_fn
+    except Exception:
+        _joint_corr_fn = None
+    # Keep individual functions as fallback
     try:
         from data.mlb_game_state import correlation_factor_same_game as _corr_fn
     except Exception:
@@ -1629,30 +1636,25 @@ def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[
             for leg in combo:
                 p_win *= _get_p_hit(leg)
 
-            # ── Correlation adjustment (pitcher + lineup) ─────────────────────
-            # Two independent correlation sources:
+            # ── Unified correlation adjustment (overlap-corrected) ────────────
+            # Uses joint_game_correlation_factor() which combines pitcher
+            # suppression + lineup cascade while correcting for their shared
+            # variance (pitcher dominance already implies weaker RBI chains).
             #
-            # 1. Pitcher-driven (downside): ace suppresses all opposing batters
-            #    → OVER stacks in ace games discounted (legs fail together)
-            #
-            # 2. Lineup-driven (upside): adjacent same-team batters benefit from
-            #    offensive chain reactions (leadoff gets on → cleanup gets RBI)
-            #    → OVER stacks in heart of order get a bonus (cascade effect)
-            #
-            # These multiply: a same-team 1-2-3 lineup stack facing a weak pitcher
-            # gets the lineup bonus but no pitcher penalty. A cross-game stack gets
-            # neither adjustment. A same-game ace stack gets only the pitcher penalty.
+            # Prevents the naive pitcher_factor × lineup_factor overcounting
+            # that made cancellation scenarios look artificially neutral.
             corr_factor = 1.0
-            if _corr_fn is not None:
+            if _joint_corr_fn is not None:
                 try:
-                    corr_factor *= _corr_fn(list(combo))
+                    corr_factor = _joint_corr_fn(list(combo))
                 except Exception:
-                    pass
-            if _lineup_corr_fn is not None:
-                try:
-                    corr_factor *= _lineup_corr_fn(list(combo))
-                except Exception:
-                    pass
+                    # Fallback: multiply individual factors (old behavior)
+                    if _corr_fn is not None:
+                        try: corr_factor *= _corr_fn(list(combo))
+                        except Exception: pass
+                    if _lineup_corr_fn is not None:
+                        try: corr_factor *= _lineup_corr_fn(list(combo))
+                        except Exception: pass
             p_win_adj = p_win * corr_factor
 
             ev = p_win_adj * payout - 1.0   # expected return on $1
