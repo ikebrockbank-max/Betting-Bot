@@ -1462,6 +1462,22 @@ def score_pick(stats: dict, pick: dict) -> dict:
                 if 0.05 < _p_model < 0.95:
                     confidence = round(confidence * 0.65 + _p_model * 0.35, 3)
 
+    # ── MLB game state vector (shared per-game signal for correlation) ───────
+    # Computed once here, stored in result so build_parlays() can use it when
+    # checking if two legs share the same game → correlation adjustment.
+    game_state = {}
+    if sport == "MLB":
+        try:
+            from data.mlb_game_state import compute_game_state as _cgs
+            game_state = _cgs(
+                pitcher_skill_score = stats.get("pitcher_skill_score"),
+                park_factor         = stats.get("park_factor") or comps.get("park_factor", 1.0),
+                game_total          = comps.get("game_total"),
+                pitcher_k_pct       = stats.get("pitcher_k_pct"),
+            )
+        except Exception:
+            pass
+
     result = {**pick, **stats}
     result["hit_score"]       = round(hit_score, 3)
     result["edge_score"]      = round(edge_score, 3)
@@ -1511,11 +1527,14 @@ def score_pick(stats: dict, pick: dict) -> dict:
     result["p_under"]                  = p_under
     # MLB pitcher strength prior fields
     result["pitcher_skill_score"]      = stats.get("pitcher_skill_score")
+    result["pitcher_k_pct"]            = stats.get("pitcher_k_pct")
     result["pitcher_tier"]             = stats.get("pitcher_tier", "")
     result["difficulty_multiplier"]    = stats.get("difficulty_multiplier", 1.0)
     result["pitcher_skill_desc"]       = stats.get("pitcher_skill_desc", "")
     result["effective_avg"]            = effective_avg
     result["median_val"]               = stats.get("median_val")
+    # Game-level latent state (shared by all players in the same MLB game)
+    result["game_state"]               = game_state
 
     return result
 
@@ -1545,20 +1564,42 @@ def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[
             by_game[gid] = pick
     pool = list(by_game.values())
 
+    # Import correlation module once outside the loop
+    try:
+        from data.mlb_game_state import correlation_factor_same_game as _corr_fn
+    except Exception:
+        _corr_fn = None
+
     parlays = []
     for n_legs in range(2, min(max_legs + 1, len(pool) + 1)):
         payout = PP_PAYOUTS.get(n_legs, 20)
         be     = PP_BREAKEVEN.get(n_legs, 0.05)
 
         best_ev = -999
-        best_combo = None
+        best_combo   = None
+        best_p_win   = 0.0
+        best_corr    = 1.0
         # Limit combos to top 20 picks to avoid explosion
         top_pool = pool[:20]
         for combo in itertools.combinations(top_pool, n_legs):
             p_win = 1.0
             for leg in combo:
                 p_win *= leg["confidence"]
-            ev = p_win * payout - 1.0   # expected return on $1
+
+            # ── Same-game correlation adjustment ─────────────────────────────
+            # Legs from the same MLB game share a pitcher/game-state risk factor.
+            # They are NOT independent: if Wheeler dominates, ALL opposing batter
+            # legs fail together. Apply a joint-probability discount proportional
+            # to pitcher dominance and direction (OVER vs UNDER stacks).
+            corr_factor = 1.0
+            if _corr_fn is not None:
+                try:
+                    corr_factor = _corr_fn(list(combo))
+                except Exception:
+                    pass
+            p_win_adj = p_win * corr_factor
+
+            ev = p_win_adj * payout - 1.0   # expected return on $1
 
             # Diversity bonus: picks from different sports are truly independent
             sports_in = {leg["sport"] for leg in combo}
@@ -1568,17 +1609,26 @@ def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[
             if ev > best_ev:
                 best_ev    = ev
                 best_combo = combo
-                best_p_win = p_win
+                best_p_win = p_win_adj
+                best_corr  = corr_factor
 
         if best_combo and best_ev > 0:
+            corr_note = ""
+            if best_corr < 0.97:
+                corr_note = f"⚠️ Same-game correlation penalty ×{best_corr:.2f}"
+            elif best_corr > 1.02:
+                corr_note = f"✅ Same-game correlation bonus ×{best_corr:.2f}"
             parlays.append({
-                "legs":     list(best_combo),
-                "n_legs":   n_legs,
-                "payout":   payout,
-                "p_win":    round(best_p_win, 3),
-                "ev":       round(best_ev, 3),
-                "ev_pct":   int(best_ev * 100),
-                "sports":   sorted({leg["sport"] for leg in best_combo}),
+                "legs":       list(best_combo),
+                "n_legs":     n_legs,
+                "payout":     payout,
+                "p_win":      round(best_p_win, 3),
+                "p_win_raw":  round(best_p_win / best_corr if best_corr else best_p_win, 3),
+                "corr_factor": best_corr,
+                "corr_note":  corr_note,
+                "ev":         round(best_ev, 3),
+                "ev_pct":     int(best_ev * 100),
+                "sports":     sorted({leg["sport"] for leg in best_combo}),
             })
 
     parlays.sort(key=lambda x: x["ev"], reverse=True)
@@ -1703,6 +1753,8 @@ def _format_discord_embed(top_picks: list[dict], parlays: list[dict]) -> dict:
                     f"• {l['player']} {l['direction']} **{l['line']}** {l['stat_type']} "
                     f"({hits_l}/{l['n_games']} hit, {l['conf_pct']}%)"
                 )
+            corr_note = par.get("corr_note", "")
+            corr_str  = f"\n{corr_note}" if corr_note else ""
             fields.append({
                 "name":  f"🎯 {par['n_legs']}-Leg Power Parlay — {par['payout']}x payout",
                 "value": (
@@ -1710,6 +1762,7 @@ def _format_discord_embed(top_picks: list[dict], parlays: list[dict]) -> dict:
                     f"**Win prob: {int(par['p_win']*100)}%** | "
                     f"**EV: +{par['ev_pct']}%** | "
                     f"Sports: {', '.join(par['sports'])}"
+                    + corr_str
                 ),
                 "inline": False,
             })

@@ -574,6 +574,7 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
         "nonzero_std":     nonzero_std,
         # Pitcher strength prior
         "pitcher_skill_score":   pitcher_skill.get("skill_score"),
+        "pitcher_k_pct":         pitcher_skill.get("k_pct"),
         "pitcher_tier":          pitcher_tier,
         "difficulty_multiplier": difficulty_mult,
         "pitcher_skill_desc":    pitcher_skill_str,
