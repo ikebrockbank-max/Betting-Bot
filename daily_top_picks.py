@@ -474,6 +474,17 @@ def run():
         return False
 
     send_notifications(picks_by_sport)
+
+    # Log every sent pick to calibration tracker
+    try:
+        from calibration_tracker import log_pick as _log_pick
+        for picks in picks_by_sport.values():
+            for p in picks:
+                _log_pick(p)
+        _log(f"Logged {total} picks to calibration tracker")
+    except Exception as e:
+        _log(f"Calibration logging failed: {e}")
+
     _log(f"Done. Sent {total} picks across {len([s for s in picks_by_sport if picks_by_sport[s]])} sports.")
     return True
 

@@ -1,0 +1,68 @@
+name: Resolve Yesterday's Results (10 AM PT)
+
+on:
+  schedule:
+    - cron: '0 17 * * *'   # 10:00 AM PT (17:00 UTC) — runs before daily picks at 11 AM
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Date to resolve (YYYY-MM-DD, default: yesterday)'
+        required: false
+        default: ''
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore calibration log
+        uses: actions/cache@v4
+        with:
+          path: logs/calibration_log.json
+          key: calibration-log-${{ github.run_id }}
+          restore-keys: calibration-log-
+
+      - name: Restore line history
+        uses: actions/cache@v4
+        with:
+          path: logs/line_history.json
+          key: line-history-${{ github.run_id }}
+          restore-keys: line-history-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Resolve results
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: |
+          DATE="${{ github.event.inputs.date }}"
+          if [ -n "$DATE" ]; then
+            python3 calibration_tracker.py update "$DATE"
+          else
+            python3 calibration_tracker.py update
+          fi
+
+      - name: Print calibration report
+        run: python3 calibration_tracker.py report
+
+      - name: Save calibration log
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: logs/calibration_log.json
+          key: calibration-log-${{ github.run_id }}
+
+      - name: Save line history
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: logs/line_history.json
+          key: line-history-${{ github.run_id }}

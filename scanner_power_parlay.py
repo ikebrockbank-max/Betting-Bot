@@ -211,6 +211,12 @@ def fetch_standard_lines(sports: list[str] = None, days_ahead: int = 1) -> list[
             lines.extend(sport_lines)
             _log(f"{sport}: {len(sport_lines)} standard lines today"
                  + (f" ({skipped_future} future games skipped)" if skipped_future else ""))
+            # Snapshot lines for movement tracking
+            try:
+                from line_tracker import snapshot_lines as _snap
+                _snap(sport_lines)
+            except Exception:
+                pass
             time.sleep(0.8)
         except Exception as e:
             _log(f"{sport}: PP fetch failed — {e}")
@@ -1014,7 +1020,18 @@ def score_pick(stats: dict, pick: dict) -> dict:
     # 6. Edge size (15%)
     edge_score = min(1.0, edge_pct / 0.30)
 
-    # 7. WNBA-specific matchup enrichments: H2H, home/away splits, opp defense
+    # 7. Line movement signal — applies to all sports
+    line_movement_note = ""
+    try:
+        from line_tracker import line_movement_signal as _lms
+        lm_adj, line_movement_note = _lms(pick["player"], stat_type,
+                                          stats.get("direction", "OVER"))
+        if lm_adj != 0.0:
+            confidence = max(0.0, min(1.0, confidence + lm_adj))
+    except Exception:
+        pass
+
+    # 8. WNBA-specific matchup enrichments: H2H, home/away splits, opp defense
     if sport == "WNBA":
         direction = stats.get("direction", "OVER")
         line_val  = stats.get("line", 1)
@@ -1249,7 +1266,8 @@ def score_pick(stats: dict, pick: dict) -> dict:
     result["rim_note"]          = rim_note
     result["playoff_games"]     = stats.get("playoff_games")
     result["playoff_min_avg"]   = stats.get("playoff_min_avg")
-    result["finals_discount"]   = finals_discount
+    result["finals_discount"]     = finals_discount
+    result["line_movement_note"]  = line_movement_note
     # WNBA projection engine fields
     result["projected_stat"]    = stats.get("projected_stat")
     result["proj_low"]          = stats.get("proj_low")

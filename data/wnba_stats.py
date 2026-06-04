@@ -496,23 +496,48 @@ def get_player_stats(
             pass
 
     # ── Minutes projection engine ──────────────────────────────────────────────
+    import statistics as _stats
+
     # Weighted: 50% L3, 30% L5, 20% season — recent minutes matter most
     l3_min = sum(fm[:3]) / min(3, len(fm)) if fm else season_min
     projected_minutes = round(l3_min * 0.50 + l5_min * 0.30 + season_min * 0.20, 1)
 
     # Role stability: coefficient of variation on minutes
-    import statistics as _stats
     min_std_dev = round(_stats.stdev(fm), 1) if len(fm) > 1 else 0.0
     role_cv     = round(min_std_dev / season_min, 3) if season_min > 0 else 1.0
     # cv < 0.15 = very stable role, 0.15–0.30 = moderate, > 0.30 = volatile
     role_stability = max(0.0, min(1.0, 1.0 - role_cv * 2))
 
-    # Per-minute rate → projected stat
+    # Role change detection — compare recent 3 games to prior 3-8 games
+    role_change = None
+    if len(fm) >= 6:
+        recent_3 = sum(fm[:3]) / 3
+        prior_3  = sum(fm[3:6]) / 3
+        delta    = recent_3 - prior_3
+        if delta >= 6:
+            role_change = "starter_spike"    # gained 6+ minutes recently
+        elif delta >= 3:
+            role_change = "minutes_up"
+        elif delta <= -6:
+            role_change = "minutes_down"
+        elif delta <= -3:
+            role_change = "minutes_reduced"
+
+    # Stat volatility — separate from minutes volatility
+    stat_std_dev   = round(_stats.stdev(fv), 2) if len(fv) > 1 else 0.0
+    stat_cv        = round(stat_std_dev / (season_avg + 1e-9), 3)
+    stat_stability = max(0.0, min(1.0, 1.0 - stat_cv))   # 1=very consistent, 0=boom/bust
+    stat_median    = round(_stats.median(fv), 2) if fv else season_avg
+
+    # Per-minute rate → projected stat (use L5 per-min rate for recency)
     stat_per_min   = (season_avg / season_min) if season_min > 0 else 0.0
-    projected_stat = round(stat_per_min * projected_minutes, 2)
-    # Uncertainty range: ±1 stdev of minutes × per-min rate
-    proj_low  = round(stat_per_min * max(0, projected_minutes - min_std_dev), 2)
-    proj_high = round(stat_per_min * (projected_minutes + min_std_dev), 2)
+    l5_per_min     = (l5_avg / l5_min) if l5_min > 0 else stat_per_min
+    # Blend: 60% recent rate, 40% season rate
+    blended_rate   = l5_per_min * 0.60 + stat_per_min * 0.40
+    projected_stat = round(blended_rate * projected_minutes, 2)
+    # Uncertainty range: ±1 stdev of minutes × rate
+    proj_low  = round(blended_rate * max(0, projected_minutes - min_std_dev), 2)
+    proj_high = round(blended_rate * (projected_minutes + min_std_dev), 2)
 
     # Usage proxy: avg FGA per game (field goal attempts = shot volume)
     fga_vals = [g.get("fga", 0) for g in full_games if g.get("fga", 0) > 0]
@@ -547,10 +572,17 @@ def get_player_stats(
         "min_std_dev":        min_std_dev,
         "role_cv":            role_cv,
         "role_stability":     round(role_stability, 3),
+        "role_change":        role_change,
         "min_change_pct":     round(min_change_pct, 3),
         "minutes_flag":       minutes_flag,
+        # Stat volatility
+        "stat_std_dev":       stat_std_dev,
+        "stat_cv":            stat_cv,
+        "stat_stability":     round(stat_stability, 3),
+        "stat_median":        stat_median,
         # Projection engine
         "stat_per_min":       round(stat_per_min, 4),
+        "blended_rate":       round(blended_rate, 4),
         "projected_stat":     projected_stat,
         "proj_low":           proj_low,
         "proj_high":          proj_high,
