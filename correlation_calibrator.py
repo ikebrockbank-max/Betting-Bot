@@ -63,8 +63,9 @@ TRANSPARENCY:
 """
 
 import json
+import math
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 
 _DATA_FILE = Path("logs/correlation_data.json")
 _DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -194,15 +195,27 @@ def _form_pairs(data: dict, game_id: str):
             dom_b = float(gs_b.get("pitcher_dominance", 0.0) or 0.0)
             game_state = gs_a if dom_a >= dom_b else gs_b
 
+            # Extract continuous game state values for kernel regression
+            # (stored alongside discrete bucket for backward compat)
+            _gs_cont = {
+                "dominance": round(float(game_state.get("pitcher_dominance", 0.0) or 0.0), 4),
+                "k_env":     round(float(game_state.get("k_environment",    0.5) or 0.5), 4),
+                "run_env":   round(float(game_state.get("run_environment",  0.5) or 0.5), 4),
+            }
+
             data["pairs"].append({
                 "pair_id":    pair_id,
                 "game_id":    game_id,
                 "bucket":     _bucket(game_state),
+                # Continuous env values for kernel regression (see get_env_conditioned_joint_factor)
+                "dominance":  _gs_cont["dominance"],
+                "k_env":      _gs_cont["k_env"],
+                "run_env":    _gs_cont["run_env"],
                 "p_a":        pick_a["p_hit"],
                 "p_b":        pick_b["p_hit"],
                 "p_product":  round(pick_a["p_hit"] * pick_b["p_hit"], 4),
-                "hit_a":      bool(pick_a["hit"]),   # individual outcomes stored
-                "hit_b":      bool(pick_b["hit"]),   # for bias-corrected denominator
+                "hit_a":      bool(pick_a["hit"]),   # individual outcomes for bias correction
+                "hit_b":      bool(pick_b["hit"]),
                 "both_hit":   pick_a["hit"] and pick_b["hit"],
                 "directions": sorted([pick_a["direction"], pick_b["direction"]]),
                 "date":       datetime.now(timezone.utc).strftime("%Y-%m-%d"),
@@ -305,6 +318,168 @@ def get_learned_joint_factor(legs: list, min_pairs: int = 20) -> float | None:
     # Stabilizes early estimates. At N=20: 50% prior, 50% data.
     # Prior = 1.0 (assume independence until proven otherwise).
     alpha = min_pairs / (n_for_shrinkage + min_pairs)
+    stable_factor = 1.0 * alpha + raw_factor * (1.0 - alpha)
+
+    return round(max(0.60, min(1.40, stable_factor)), 3)
+
+
+# ── Kernel helpers ────────────────────────────────────────────────────────────
+
+def _env_similarity(
+    d_cur: float, k_cur: float, r_cur: float,
+    d_hist: float, k_hist: float, r_hist: float,
+    bandwidth: float = 0.18,
+) -> float:
+    """
+    Gaussian kernel: how similar is a historical pair's game environment to now?
+
+    Dimension weights:
+      pitcher_dominance ×2.0 — strongest environmental factor (ace vs weak starter
+        is a completely different game state; should shrink weight quickly)
+      k_environment     ×1.5 — directly affects baserunner chains
+      run_environment   ×1.0 — park/total context, less acute
+
+    Returns 0..1. Two identical game states → 1.0. Wheeler (D=0.53) vs avg ace
+    (D=0.46) → 0.86. Wheeler vs weak pitcher (D=0.00) → 0.03.
+    """
+    dist_sq = (
+        2.0 * (d_cur - d_hist) ** 2 +
+        1.5 * (k_cur - k_hist) ** 2 +
+        1.0 * (r_cur - r_hist) ** 2
+    )
+    return math.exp(-dist_sq / (2.0 * bandwidth ** 2))
+
+
+def _time_weight(pair_date_str: str, half_life_days: int = 60) -> float:
+    """
+    Exponential decay: pairs 60 days old get 50% weight, 120 days = 25%.
+
+    Addresses the stationarity problem: pitcher form, lineup construction, and
+    park effects drift over a season. More recent pairs reflect current reality
+    more accurately than data from 3 months ago.
+    """
+    try:
+        pair_dt = date.fromisoformat(pair_date_str)
+        days_old = max(0, (date.today() - pair_dt).days)
+        return math.exp(-math.log(2) * days_old / half_life_days)
+    except Exception:
+        return 0.5   # neutral weight when date is missing or malformed
+
+
+# ── Environment-conditioned joint factor ─────────────────────────────────────
+
+def get_env_conditioned_joint_factor(
+    legs: list,
+    min_effective_n: float = 10.0,
+) -> float | None:
+    """
+    Environment-conditioned joint factor via kernel regression.
+
+    This is the structurally correct form of the correlation correction:
+
+      P(A,B | env) / (P(A | env) × P(B | env))
+
+    Three explicit layers:
+      1. Marginal model    — P(A), P(B): from the projection engine per pick
+      2. Environment model — game_state: pitcher_dominance, k_env, run_env
+      3. Dependency        — this function: how much do legs co-move *given* env?
+
+    WHY KERNEL OVER DISCRETE BUCKETS:
+      Both Wheeler (D=0.53, K=0.84) and an avg ace (D=0.46, K=0.66) land in
+      "high_K|ace". But their kernel weight difference for a Wheeler-tier game
+      is 0.86 vs 0.35 — the kernel naturally treats them as different.
+      Discrete buckets collapse that distinction; kernel regression doesn't.
+
+    WHY TEMPORAL DECAY:
+      Addresses regime drift. Pair from July with a hot lineup is less relevant
+      for a cold April game even if game state vectors are similar.
+
+    HOW IT WORKS:
+      For each historical pair with stored continuous game state (dominance,
+      k_env, run_env), compute:
+        weight = env_similarity(current, hist) × time_decay(pair_date)
+      Then compute kernel-weighted hit rates:
+        w_joint  = Σ(weight × both_hit) / Σ(weight)
+        w_rate_a = Σ(weight × hit_a)    / Σ(weight)
+        w_rate_b = Σ(weight × hit_b)    / Σ(weight)
+      Raw factor = w_joint / (w_rate_a × w_rate_b)   ← bias-corrected
+
+    EFFECTIVE SAMPLE SIZE (Kish):
+      eff_n = (Σw)² / Σw²
+      Shrinkage: α = min_eff_n / (eff_n + min_eff_n)
+                 stable = 1.0 × α + raw × (1 − α)
+
+    Requires pairs with "dominance", "k_env", "run_env", "hit_a", "hit_b".
+    Gracefully returns None (callers fall back to bucket-learned, then formula).
+
+    Args:
+        legs:           list of scored pick dicts (need game_state)
+        min_effective_n: minimum effective sample before returning a value
+    """
+    if not legs:
+        return None
+
+    # Get current game state — use the most dominant game across all legs
+    best_gs  = {}
+    best_dom = 0.0
+    for leg in legs:
+        gs = leg.get("game_state") or {}
+        d  = float(gs.get("pitcher_dominance", 0.0) or 0.0)
+        if d > best_dom:
+            best_dom = d
+            best_gs  = gs
+
+    if not best_gs:
+        return None
+
+    d_cur = float(best_gs.get("pitcher_dominance", 0.0) or 0.0)
+    k_cur = float(best_gs.get("k_environment",    0.5) or 0.5)
+    r_cur = float(best_gs.get("run_environment",  0.5) or 0.5)
+
+    data = _load()
+
+    # Only usable pairs have continuous game state AND individual outcomes
+    usable = [
+        p for p in data.get("pairs", [])
+        if "dominance" in p and "hit_a" in p and "hit_b" in p
+    ]
+
+    if len(usable) < 5:
+        return None   # wait for a minimal corpus before kernel estimation
+
+    # ── Per-pair weights ──────────────────────────────────────────────────────
+    weights = []
+    for p in usable:
+        env_w  = _env_similarity(
+            d_cur, k_cur, r_cur,
+            float(p.get("dominance", 0.0) or 0.0),
+            float(p.get("k_env",    0.5) or 0.5),
+            float(p.get("run_env",  0.5) or 0.5),
+        )
+        time_w = _time_weight(p.get("date", ""))
+        weights.append(env_w * time_w)
+
+    total_w = sum(weights)
+    if total_w < 0.01:
+        return None
+
+    # Kish effective sample size: penalises when few pairs dominate the weights
+    sum_w2  = sum(w * w for w in weights)
+    eff_n   = (total_w ** 2) / sum_w2 if sum_w2 > 0 else 0.0
+
+    if eff_n < min_effective_n:
+        return None   # not enough environmentally-relevant history yet
+
+    # ── Kernel-weighted hit rates (bias-corrected baseline) ───────────────────
+    w_joint  = sum(w * p["both_hit"] for w, p in zip(weights, usable)) / total_w
+    w_rate_a = sum(w * p["hit_a"]    for w, p in zip(weights, usable)) / total_w
+    w_rate_b = sum(w * p["hit_b"]    for w, p in zip(weights, usable)) / total_w
+
+    independence_baseline = max(0.01, w_rate_a * w_rate_b)
+    raw_factor = w_joint / independence_baseline
+
+    # ── Shrinkage toward independence ─────────────────────────────────────────
+    alpha         = min_effective_n / (eff_n + min_effective_n)
     stable_factor = 1.0 * alpha + raw_factor * (1.0 - alpha)
 
     return round(max(0.60, min(1.40, stable_factor)), 3)
@@ -419,19 +594,29 @@ def get_calibration_summary() -> dict:
         b for b, v in bias_summary.items() if v["calibration"] == "overconfident"
     ]
 
+    # Kernel-ready pairs: have continuous game state + individual outcomes
+    # (stored since this version — old pairs with only "both_hit" don't qualify)
+    kernel_ready_pairs = sum(
+        1 for p in pairs if "dominance" in p and "hit_a" in p and "hit_b" in p
+    )
+
     return {
-        "total_picks_resolved":  total_picks,
-        "total_pairs_observed":  total_pairs,
+        "total_picks_resolved":   total_picks,
+        "total_pairs_observed":   total_pairs,
         "pairs_needed_per_bucket": min_thresh,
-        "buckets_calibrated":    n_calibrated,
-        "buckets_total":         6,
-        "bucket_counts":         bucket_counts,
-        "bucket_factors":        bucket_factors,    # empirical when available
-        "status":                status,
-        "pct_complete":          round(min(100, total_pairs / (min_thresh * 6) * 100), 1),
+        "buckets_calibrated":     n_calibrated,
+        "buckets_total":          6,
+        "bucket_counts":          bucket_counts,
+        "bucket_factors":         bucket_factors,    # empirical when available
+        "status":                 status,
+        "pct_complete":           round(min(100, total_pairs / (min_thresh * 6) * 100), 1),
+        # Kernel regression layer (most precise — conditioned on continuous env)
+        "kernel_ready_pairs":     kernel_ready_pairs,
+        "kernel_active_threshold": 5,    # pairs needed before kernel attempts estimate
+        "kernel_active":          kernel_ready_pairs >= 5,
         # Bias correction transparency
-        "projection_bias":       bias_summary,      # per-bucket predicted vs actual
-        "overconfident_buckets": overconfident_buckets,
+        "projection_bias":        bias_summary,      # per-bucket predicted vs actual
+        "overconfident_buckets":  overconfident_buckets,
         "bias_correction_active": any(                # True once we have enough picks
             v["n_picks"] >= 20 for v in bias_summary.values()
         ),

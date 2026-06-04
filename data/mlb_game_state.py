@@ -5,32 +5,38 @@ KEY INSIGHT: MLB player outcomes within the same game are NOT independent.
 When Wheeler dominates, ALL opposing batters underperform together — it's one
 shared game-state event, not three independent 30% misses.
 
-This module computes a shared game state once per game and exposes:
+THREE-LAYER CORRELATION MODEL (joint_game_correlation_factor):
+  Layer 1 — Marginal model:    P(A), P(B)
+             Per-pick projection engine (zero-inflated mixture, pitcher adjustment)
 
-  1. compute_game_state()              — game state dict for annotation
-  2. correlation_factor_same_game()   — pitcher-driven penalty/bonus
-  3. lineup_correlation_factor()      — lineup-driven cascade bonus
-  4. joint_game_correlation_factor()  — UNIFIED model with DYNAMIC overlap
-                                        derived from game state (use this for parlays)
+  Layer 2 — Environment model: game_state
+             Shared causal context: pitcher_dominance, k_environment, run_environment
 
-CORRELATION MATH:
-  Naïve parlay model:   P(A ∩ B ∩ C) = P(A) × P(B) × P(C)
-  Correlated reality:   P(A ∩ B ∩ C) = P(A) × P(B) × P(C) × corr_factor
+  Layer 3 — Conditional dependency:  P(A,B | env) / (P(A|env) × P(B|env))
+             How much do legs co-move *given* the environment?
+             This is the "pure correlation" — not shared exposure, not projection bias.
 
-OVERLAP CORRECTION (why joint_game_correlation_factor exists):
+PRIORITY CHAIN in joint_game_correlation_factor():
+  1. Kernel factor (get_env_conditioned_joint_factor):
+     - Kernel regression over continuous game state × temporal decay
+     - Most precise: P(A,B|env) / (P(A|env) × P(B|env)) conditioned on environment
+     - Requires eff_n ≥ 10 kernel-weighted pairs; activates after ~1-2 months
+  2. Bucket factor (get_learned_joint_factor):
+     - Empirical factor from discrete 6-bucket scheme with bias correction + shrinkage
+     - Requires 20+ resolved pairs per bucket; activates after ~2-3 months
+  3. Dynamic formula (always available):
+     - Structural model: dynamic overlap from K%, run_env, pitcher_dominance
+     - Our prior beliefs, running until the empirical layers have enough data
+
+OVERLAP CORRECTION (formula layer):
   pitcher_factor and lineup_factor are NOT independent — they share variance.
   Wheeler's strikeout rate already suppresses baserunners, which reduces the
   RBI cascade that lineup_factor is trying to credit. Multiplying them at face
   value overcounts the cancellation effect.
 
   joint_game_correlation_factor accounts for this overlap:
-    effective_lineup_dev = (lineup_factor − 1) × (1 − D × 0.75)
+    effective_lineup_dev = (lineup_factor − 1) × (1 − D × dynamic_overlap)
     joint = pitcher_factor × (1 + effective_lineup_dev)
-  where D = pitcher dominance [0, 1].
-
-  Example: Wheeler (D=0.53) + 1-3-4 lineup (cascade=×1.18)
-    Naïve:       0.872 × 1.18 = 1.028  (wrongly suggests neutral)
-    Overlap-adj: 0.872 × 1.123 = 0.979  (correctly slightly suppressed)
 
   OVER stack vs ace pitcher:   corr_factor < 1.0  (legs fail together)
   UNDER stack vs ace pitcher:  corr_factor > 1.0  (legs succeed together)
@@ -322,16 +328,29 @@ def joint_game_correlation_factor(legs: list) -> float:
     Returns:
         float joint correlation factor for the full combo [0.65, 1.25].
     """
-    # ── Check for empirically learned factor first ───────────────────────────
-    # When correlation_calibrator has accumulated enough resolved same-game
-    # pairs for this game state bucket (default: 20), use the observed joint
-    # hit rate instead of the formula. This is the self-calibration loop:
-    # model assumptions → structural formula → empirical calibration → learned values.
+    # ── Priority 1: environment-conditioned kernel factor ────────────────────
+    # The most structurally correct form: P(A,B|env) / (P(A|env) × P(B|env))
+    # Uses kernel regression over continuous game state (dominance, K%, run env)
+    # with temporal decay — separates co-movement from projection bias.
+    # Requires pairs with continuous env + individual outcomes (hit_a/hit_b).
+    # Returns None until effective N ≥ 10 (starts contributing after ~1 month).
+    try:
+        from correlation_calibrator import get_env_conditioned_joint_factor as _gecjf
+        _env_cond = _gecjf(legs)
+        if _env_cond is not None:
+            return _env_cond
+    except Exception:
+        pass
+
+    # ── Priority 2: bucket-learned factor ────────────────────────────────────
+    # When enough same-game pairs exist for the discrete 6-bucket scheme (≥20),
+    # use the bias-corrected empirical factor with shrinkage.
+    # Coarser than kernel but valid if env-conditioned is unavailable.
     try:
         from correlation_calibrator import get_learned_joint_factor as _glf
         _learned = _glf(legs)
         if _learned is not None:
-            return _learned   # empirical > formula when data is sufficient
+            return _learned
     except Exception:
         pass
 
