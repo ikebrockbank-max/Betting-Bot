@@ -26,8 +26,10 @@ from pathlib import Path
 # User wants "much different" — only fire on genuinely significant discrepancies.
 # Example that fires: PP=24.5 pts, consensus=19.5 pts → diff=5.0 (25%) ✓
 # Example that doesn't: PP=22.5, consensus=20.5 → diff=2.0 (9.7%) ✗
-MIN_ABS_DIFF  = 3.0   # minimum absolute gap (units)
-MIN_PCT_DIFF  = 0.20  # minimum percentage gap (20%) — both must be met
+MIN_ABS_DIFF  = 1.0   # minimum absolute gap (units) — catches ≥1 unit off
+MIN_PCT_DIFF  = 0.06  # minimum percentage gap (6%)  — catches ≥6% off
+# Either threshold alone is sufficient (OR logic) — PP now tracks books within ±0.5 so
+# requiring BOTH would produce 0 alerts. A 1-unit gap OR a 6%+ gap is meaningful.
 MIN_BOOKS     = 2     # need at least this many books to trust consensus
 
 # ── PP stat name → Action Network / Odds API market key ───────────────────────
@@ -148,7 +150,8 @@ def _compare(platform_line: float, consensus: float, player: str, stat: str,
     abs_diff = abs(diff)
     pct_diff = abs_diff / consensus if consensus > 0 else 0
 
-    if abs_diff < MIN_ABS_DIFF or pct_diff < MIN_PCT_DIFF:
+    # OR logic: either a meaningful absolute gap or a meaningful percentage gap
+    if abs_diff < MIN_ABS_DIFF and pct_diff < MIN_PCT_DIFF:
         return None
 
     direction = "under" if diff > 0 else "over"
