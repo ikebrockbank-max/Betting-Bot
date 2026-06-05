@@ -1124,6 +1124,21 @@ def score_pick(stats: dict, pick: dict) -> dict:
     if pitcher_adj_note:
         ctx.setdefault("description", []).insert(0, pitcher_adj_note)
 
+    # For walk props: surface Poisson correction + pitcher BB rate in context notes
+    if sport == "MLB" and stat_type == "Walks" and stats.get("direction") == "UNDER":
+        poisson_p  = stats.get("poisson_p_zero")
+        pit_walk   = stats.get("pitcher_walk_adj")
+        pit_bb_pct = stats.get("pitcher_bb_pct")
+        if poisson_p is not None:
+            ctx.setdefault("description", []).append(
+                f"📊 Poisson P(0 walks/game): {poisson_p:.0%} — true rate, streak-adjusted"
+            )
+        if pit_bb_pct is not None and pit_walk is not None:
+            risk = "⚠️ HIGH-WALK" if pit_bb_pct > 0.09 else ("⚠️ MODERATE" if pit_bb_pct > 0.07 else "✅ Low-walk")
+            ctx.setdefault("description", []).append(
+                f"{risk} pitcher — BB%: {pit_bb_pct:.1%}, P(0 walks today): {pit_walk:.0%}"
+            )
+
     # 7. Line movement signal — store adjustment, apply after confidence is computed
     line_movement_note = ""
     _lm_adj = 0.0

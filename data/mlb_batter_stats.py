@@ -481,6 +481,32 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
     nonzero_mean    = round(sum(_nonzero_vals) / len(_nonzero_vals), 2) if _nonzero_vals else None
     nonzero_std     = round(_stat_mod.stdev(_nonzero_vals), 2) if len(_nonzero_vals) >= 3 else None
 
+    # ── Rare-event Poisson correction ────────────────────────────────────────
+    # For low-frequency count stats (Walks, HR, etc.) the hit_rate from recent
+    # games is dominated by lucky streaks.  A 7-game zero-walk streak doesn't
+    # mean the player never walks — it means they had a hot streak.
+    #
+    # Walks are a Poisson process: P(0 walks per game) = e^(−λ), λ = avg/game.
+    # Suzuki avg=0.25 → P(0 walks) = e^(−0.25) = 77.9%.
+    # A 7-game streak would push the raw hit_rate to 87.5% — we cap it to 77.9%.
+    #
+    # Additionally, the opposing pitcher's BB% (walks per batter faced) adjusts
+    # the expected walk probability for today's game:
+    #   P(walk this game | pitcher) = 1 − (1 − pitcher_bb_pct)^PA
+    # A high-walk pitcher can flip a 77% UNDER to a 50% — below our threshold.
+    _RARE_COUNT_STATS = {"Walks", "Home Runs"}
+    import math as _math
+    poisson_p_zero      = None   # Poisson P(0 events) from season avg
+    pitcher_bb_pct      = None   # pitcher walk rate (BB per batter faced)
+    pitcher_walk_adj    = None   # adjusted P(0 walks today) given pitcher BB%
+
+    if stat_type in _RARE_COUNT_STATS and avg_n > 0 and direction == "UNDER":
+        # Poisson cap: season avg is the most honest λ estimate
+        poisson_p_zero = round(_math.exp(-avg_n), 3)
+        # Cap hit_rate to Poisson probability — streak can't inflate above this
+        if hit_rate > poisson_p_zero:
+            hit_rate = poisson_p_zero
+
     # ── Pitcher strength prior (opponent quality layer) ───────────────────────
     # Fetch a composite skill score for today's opposing pitcher so the batter
     # model can differentiate Wheeler from a AAA callup. The multiplier is
@@ -494,11 +520,30 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
         opp_pid = game.get("opp_pitcher_id") if game else None
         if opp_pid:
             try:
-                from data.mlb_pitcher_strength import get_pitcher_skill_score
-                pitcher_skill   = get_pitcher_skill_score(opp_pid)
-                difficulty_mult = pitcher_skill.get("multiplier", 1.0)
-                pitcher_tier    = pitcher_skill.get("tier", "unknown")
+                from data.mlb_pitcher_strength import get_pitcher_skill_score, get_pitcher_season_stats
+                pitcher_skill     = get_pitcher_skill_score(opp_pid)
+                difficulty_mult   = pitcher_skill.get("multiplier", 1.0)
+                pitcher_tier      = pitcher_skill.get("tier", "unknown")
                 pitcher_skill_str = pitcher_skill.get("description", "")
+                # For walk props: get pitcher's actual BB% to compute
+                # today's walk probability (pitcher dominates batter tendency for walks)
+                if stat_type == "Walks":
+                    p_season = get_pitcher_season_stats(opp_pid)
+                    pitcher_bb_pct = p_season.get("bb_pct")   # BB per batter faced
+                    if pitcher_bb_pct is not None:
+                        pa_per_game = 4.0   # typical batter PA per game
+                        # P(batter walks at least once today) = 1 − (1−bb_pct)^PA
+                        p_walk_game = 1.0 - ((1.0 - pitcher_bb_pct) ** pa_per_game)
+                        pitcher_walk_adj = round(1.0 - p_walk_game, 3)  # P(0 walks today)
+                        # Further cap hit_rate: take the LOWER of Poisson cap and
+                        # pitcher-adjusted probability — both must be satisfied
+                        if direction == "UNDER":
+                            effective_cap = min(
+                                poisson_p_zero if poisson_p_zero else 1.0,
+                                pitcher_walk_adj
+                            )
+                            if hit_rate > effective_cap:
+                                hit_rate = effective_cap
             except Exception:
                 pass
 
@@ -584,6 +629,10 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
         "difficulty_multiplier": difficulty_mult,
         "pitcher_skill_desc":    pitcher_skill_str,
         "pitcher_recent_era":    pitcher_skill.get("recent_era"),
+        # Rare-event Poisson correction (Walks, HR)
+        "poisson_p_zero":        poisson_p_zero,      # P(0 events) from season avg
+        "pitcher_bb_pct":        pitcher_bb_pct,       # pitcher walk rate (BB/BF)
+        "pitcher_walk_adj":      pitcher_walk_adj,     # P(0 walks today) given pitcher BB%
         # Advanced H2H + Statcast
         "h2h":                  h2h_data,
         "vs_team":              vs_team_data,
