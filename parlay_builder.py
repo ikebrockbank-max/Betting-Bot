@@ -286,74 +286,66 @@ def format_parlay_plan(
         return "No qualifying parlays found."
 
     lines = []
-    total_bet  = sum(p["bet_size"] for p in parlays)
-    total_win  = sum(p["win_amount"] for p in parlays)
-    # Expected value: EV per parlay = (p_win × payout - 1) × bet_size
-    total_ev   = sum(p["ev"] * p["bet_size"] for p in parlays)
+    total_bet = sum(p["bet_size"] for p in parlays)
+    total_win = sum(p["win_amount"] for p in parlays)
 
-    lines.append(f"💰 PARLAY PORTFOLIO — ${bankroll:.0f} bankroll")
-    lines.append(f"   Risking ${total_bet:.2f} across {len(parlays)} parlays")
-    lines.append(f"   Expected value: +${total_ev:.2f} | Max win: ${total_win:.2f}")
+    lines.append(f"💰 PARLAY PLAN — ${bankroll:.0f} bankroll")
+    lines.append(f"   Placing ${total_bet:.2f} across {len(parlays)} parlays")
+    lines.append(f"   If all parlays hit: ${total_win:.2f}  |  Most likely outcome: some hit, some miss")
     lines.append("")
 
     sport_emoji = {"MLB": "⚾", "WNBA": "🏀", "NBA": "🏀", "NHL": "🏒",
                    "TENNIS": "🎾", "SOCCER": "⚽"}
 
     for i, par in enumerate(parlays, 1):
-        payout     = par["payout"]
-        p_win_pct  = int(par["p_win"] * 100)
-        ev_pct     = par["ev_pct"]
-        bet        = par["bet_size"]
-        win_amt    = par["win_amount"]
-        net        = par["net_profit"]
-        ev_tag     = par["ev_rating"]
-        corr       = par["corr"]
+        payout    = int(par["payout"])
+        p_win_pct = int(par["p_win"] * 100)
+        bet       = par["bet_size"]
+        win_amt   = par["win_amount"]
+        net       = par["net_profit"]
+        corr      = par["corr"]
+        n_legs    = par["n_legs"]
 
-        lines.append(
-            f"━━━ Parlay {i}  ·  {par['n_legs']}-pick  ·  {payout:.0f}x  ·  {ev_tag} ━━━"
-        )
-        lines.append(f"   P(win): {p_win_pct}%  |  EV: +{ev_pct}%  |  Bet: ${bet:.2f}  →  Win: ${win_amt:.2f} (+${net:.2f})")
+        lines.append(f"━━━ Parlay {i}  ({n_legs}-pick, {payout}x payout) ━━━")
+        lines.append(f"   Bet ${bet:.2f}  →  Win ${win_amt:.2f} (+${net:.2f} profit) if all {n_legs} hit")
+        lines.append(f"   Model win probability: {p_win_pct}%")
 
-        # Correlation note
         if corr < 0.94:
-            lines.append(f"   ⚠️  Same-game correlation: ×{corr:.2f} applied to p_win")
+            lines.append(f"   ⚠️  Two legs in the same game — win chance reduced slightly")
         elif corr > 1.03:
-            lines.append(f"   ✅  Lineup correlation bonus: ×{corr:.2f}")
+            lines.append(f"   ✅  Lineup correlation bonus applied")
 
         lines.append("")
 
         for leg in par["leg_summary"]:
-            e     = sport_emoji.get(leg["sport"], "🎯")
-            arrow = "📈" if leg["direction"] == "OVER" else "📉"
-            src   = "📊" if leg["p_src"] == "model" else "🔢"
+            e         = sport_emoji.get(leg["sport"], "🎯")
+            direction = leg["direction"]
+            arrow     = "↑" if direction == "OVER" else "↓"
+            hit_pct   = int(leg["hit_rate"] * 100)
+            avg       = leg["avg"]
+            recent    = leg["recent_5"]
             lines.append(
-                f"   {e}{arrow} {leg['player']}  {leg['direction']} {leg['line']} {leg['stat_type']}"
+                f"   {e}{arrow} {leg['player']}  {direction} {leg['line']} {leg['stat_type']}"
             )
             lines.append(
-                f"      {src} P(hit)={leg['p_hit_pct']}%  ·  {int(leg['hit_rate']*100)}% HR  ·  avg {leg['avg']}  ·  L5: {leg['recent_5']}"
+                f"      Hit {hit_pct}% of games  ·  season avg {avg}  ·  last 5: {recent}"
             )
 
-        # Kelly math transparency
-        lines.append("")
-        lines.append(
-            f"   Kelly: full={par['kelly_full_pct']}% → 25% fractional={par['kelly_frac_pct']}% → ${bet:.2f}"
-        )
+        lines.append(f"   (Sized by Kelly formula on ${bankroll:.0f} bankroll)")
         lines.append("")
 
     lines.append("─" * 50)
-    lines.append(f"TOTAL RISK: ${total_bet:.2f} / ${bankroll:.0f} ({total_bet/bankroll*100:.0f}%)")
-    lines.append(f"EXPECTED RETURN: +${total_ev:.2f}  (EV on risk: +{total_ev/total_bet*100:.1f}%)")
+    lines.append(f"TOTAL AT RISK: ${total_bet:.2f} of ${bankroll:.0f}")
     lines.append("")
 
-    # Standalone top singles (high confidence but no parlay)
     if top_singles:
-        lines.append("BEST STANDALONE EDGES (single picks, no parlay sizing):")
+        lines.append("OTHER STRONG SINGLE PICKS (not in parlays above):")
         for s in top_singles[:5]:
             e     = sport_emoji.get(s["sport"], "🎯")
-            arrow = "📈" if s["direction"] == "OVER" else "📉"
+            arrow = "↑" if s["direction"] == "OVER" else "↓"
             lines.append(
                 f"  {e}{arrow} {s['player']} {s['direction']} {s['line']} {s['stat_type']} "
-                f"— {s['conf_pct']}% conf · {int(s.get('hit_rate',0)*100)}% HR"
+                f"— {int(s.get('hit_rate',0)*100)}% hit rate, avg {s.get('avg','?')}"
             )
 
     return "\n".join(lines)
@@ -362,30 +354,36 @@ def format_parlay_plan(
 def format_parlay_ntfy(parlays: list[dict], bankroll: float) -> tuple[str, str]:
     """
     Returns (title, body) for ntfy push notification.
-    Compact format — designed for phone screen.
+    Human-readable format — designed for phone screen.
+    Plain English, no jargon. Shows stat type on every leg.
     """
     if not parlays:
         return "No parlays found", "No qualifying parlays today."
 
     total_bet = sum(p["bet_size"] for p in parlays)
     total_win = sum(p["win_amount"] for p in parlays)
-    total_ev  = sum(p["ev"] * p["bet_size"] for p in parlays)
 
-    title = (
-        f"🎯 {len(parlays)} parlays | Risk ${total_bet:.0f} | Max ${total_win:.0f} | EV +${total_ev:.2f}"
-    )
+    title = f"🎯 {len(parlays)} parlays today — risk ${total_bet:.0f}, max win ${total_win:.0f}"
 
     lines = []
     for i, par in enumerate(parlays, 1):
-        legs_str = " + ".join(
-            f"{l['player'].split()[-1]} {l['direction']} {l['line']}"
-            for l in par["leg_summary"]
-        )
-        lines.append(
-            f"[{i}] ${par['bet_size']:.0f}→${par['win_amount']:.0f} | {par['n_legs']}pk {par['payout']:.0f}x | "
-            f"P={int(par['p_win']*100)}% EV+{par['ev_pct']}%\n"
-            f"    {legs_str}"
-        )
+        bet     = par["bet_size"]
+        win     = par["win_amount"]
+        p_win   = int(par["p_win"] * 100)
+        n_legs  = par["n_legs"]
+        payout  = int(par["payout"])
+
+        lines.append(f"── Parlay {i}: ${bet:.0f} bet → ${win:.0f} if all {n_legs} hit ({p_win}% chance) ──")
+        for leg in par["leg_summary"]:
+            direction  = leg["direction"]
+            line       = leg["line"]
+            stat       = leg["stat_type"]
+            player     = leg["player"]
+            hit_pct    = int(leg["hit_rate"] * 100)
+            avg        = leg["avg"]
+            arrow      = "↑" if direction == "OVER" else "↓"
+            lines.append(f"  {arrow} {player} — {direction} {line} {stat}  ({hit_pct}% hit rate, avg {avg})")
+        lines.append("")
 
     body = "\n".join(lines)
     return title, body
