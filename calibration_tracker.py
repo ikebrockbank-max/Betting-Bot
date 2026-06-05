@@ -203,6 +203,7 @@ def log_pick(result: dict):
         "game_id":       result.get("game_id", ""),
         "pp_id":         result.get("pp_id", ""),
         "projected_stat":result.get("projected_stat"),
+        "was_qualified": bool(result.get("was_qualified", False)),
         "resolved":      False,
     }
 
@@ -212,7 +213,7 @@ def log_pick(result: dict):
         # Local fallback
         entries = _local_load()
         uid = f"{result['player']}|{result['stat_type']}|{today}"
-        if not any(f"{e['player']}|{e['stat_type']}|{e['pick_date']}" == uid for e in entries):
+        if not any(f"{e['player']}|{e['stat_type']}|{e.get('pick_date', e.get('date',''))}" == uid for e in entries):
             entries.append(row)
             _local_save(entries)
 
@@ -584,30 +585,43 @@ def _load_resolved() -> list[dict]:
 
 
 def calibration_report(min_picks: int = 5):
-    entries = _load_resolved()
-    if not entries:
+    all_entries = _load_resolved()
+    if not all_entries:
         print("No resolved picks yet. Run update_results() first.")
         return
 
+    qualified = [e for e in all_entries if e.get("was_qualified")]
+    watched   = [e for e in all_entries if not e.get("was_qualified")]
+
     print(f"\n{'='*60}")
-    print(f"CALIBRATION REPORT  ({len(entries)} resolved picks)")
+    print(f"CALIBRATION REPORT")
+    print(f"  {len(all_entries)} total resolved  |  "
+          f"{len(qualified)} bet  |  {len(watched)} watched")
     print(f"{'='*60}\n")
 
+    # Overall — bet picks only
+    entries = all_entries   # use all for calibration curves
     hits = sum(1 for e in entries if e.get("hit"))
-    print(f"Overall hit rate: {hits}/{len(entries)} = {hits/len(entries):.1%}\n")
+    q_hits = sum(1 for e in qualified if e.get("hit"))
+    if qualified:
+        print(f"Bet picks hit rate:   {q_hits}/{len(qualified)} = {q_hits/len(qualified):.1%}")
+    print(f"All picks hit rate:   {hits}/{len(entries)} = {hits/len(entries):.1%}\n")
 
-    print("Hit rate by confidence bucket:")
-    for lo, hi in [(60,70),(70,75),(75,80),(80,85),(85,90),(90,100)]:
+    print("Is the confidence score real? (model % vs actual hit rate per bucket)")
+    print(f"  {'Bucket':<10} {'Model':<8} {'Real':<8} {'Delta':<10} {'N picks':<10} {'N bet'}")
+    print(f"  {'-'*58}")
+    for lo, hi in [(40,50),(50,60),(60,65),(65,70),(70,75),(75,80),(80,85),(85,100)]:
         bucket = [e for e in entries if lo <= (e.get("conf_pct") or 0) < hi]
         if len(bucket) >= min_picks:
             b_hits  = sum(1 for e in bucket if e.get("hit"))
             ideal   = (lo + hi) / 2 / 100
             actual_r = b_hits / len(bucket)
             delta   = actual_r - ideal
+            n_bet   = sum(1 for e in bucket if e.get("was_qualified"))
             flag    = ("✅" if abs(delta) < 0.05
-                       else ("🔴 OVER-CONFIDENT" if delta < 0 else "🟢 UNDER-CONFIDENT"))
-            print(f"  {lo}-{hi}%: {b_hits}/{len(bucket)} = {actual_r:.1%}  "
-                  f"(model said ~{ideal:.0%}) {flag}")
+                       else ("🔴 OVER" if delta < 0 else "🟢 UNDER"))
+            print(f"  {lo:2d}-{hi:3d}%  {ideal:.0%}      {actual_r:.0%}      "
+                  f"{delta:+.0%}  {flag:<8}   {len(bucket):<10} {n_bet}")
 
     print("\nHit rate by sport:")
     for sport in ["MLB", "NBA", "WNBA"]:

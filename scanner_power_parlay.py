@@ -2146,7 +2146,12 @@ def run(sports: list[str] = None, force: bool = False):
         return
 
     # 2. Score every line
-    scored = []
+    # scored_all: every pick with enough game history, regardless of confidence.
+    #             Logged to Supabase so we can validate whether model confidence
+    #             actually predicts hit rate across the full spectrum (30%–90%).
+    # scored:     only picks above MIN_CONF — used for parlay building / notifications.
+    scored_all = []
+    scored     = []
     for i, pick in enumerate(all_lines):
         stats = get_stats_for_pick(pick)
         if stats is None:
@@ -2154,14 +2159,17 @@ def run(sports: list[str] = None, force: bool = False):
         if stats.get("n_games", 0) < MIN_GAMES:
             continue
         s = score_pick(stats, pick)
-        if s["confidence"] >= MIN_CONF:
+        # Tag whether this pick passed the betting threshold
+        s["was_qualified"] = s["confidence"] >= MIN_CONF
+        scored_all.append(s)
+        if s["was_qualified"]:
             scored.append(s)
         # Progress log every 20 picks
         if (i + 1) % 20 == 0:
             _log(f"  Scored {i+1}/{len(all_lines)} lines, {len(scored)} qualified so far...")
         time.sleep(0.05)  # light rate-limit respect
 
-    _log(f"Qualified picks: {len(scored)}")
+    _log(f"All scored: {len(scored_all)} | Qualified (≥{int(MIN_CONF*100)}%): {len(scored)}")
 
     if not scored:
         _log("No qualified picks — nothing to send")
@@ -2224,20 +2232,29 @@ def run(sports: list[str] = None, force: bool = False):
                         bankroll=bankroll)
 
     # 8. Log picks + parlays for result tracking + calibration
+    # Log ALL scored picks (not just qualified ones) so we can validate whether
+    # model confidence is actually predictive across the full 40-90% range.
+    # was_qualified=True marks picks that passed the threshold and were bet.
+    # was_qualified=False marks picks we watched but didn't bet — equally valuable
+    # for calibration (did the 55% picks really hit 55% of the time?).
     try:
         from calibration_tracker import log_pick as _log_pick, log_parlay as _log_parlay
         today = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%d")
 
-        # Log individual picks
-        logged = 0
-        for p in scored:
+        # Log every scored pick regardless of confidence threshold
+        logged_qualified = 0
+        logged_watched   = 0
+        for p in scored_all:
             try:
                 _log_pick(p)
-                logged += 1
+                if p.get("was_qualified"):
+                    logged_qualified += 1
+                else:
+                    logged_watched += 1
             except Exception:
                 pass
-        if logged:
-            _log(f"Logged {logged} picks to Supabase for calibration.")
+        if logged_qualified or logged_watched:
+            _log(f"Logged {logged_qualified} bet picks + {logged_watched} watched picks to Supabase.")
 
         # Log each parlay from the Kelly portfolio for P&L tracking
         final_parlays = kelly_parlays if kelly_parlays else []
