@@ -72,7 +72,7 @@ def _get_json(url: str, extra_headers: dict = None) -> dict:
     if extra_headers:
         headers.update(extra_headers)
     req = urllib.request.Request(url, headers=headers)
-    return json.loads(urllib.request.urlopen(req, timeout=12).read())
+    return json.loads(urllib.request.urlopen(req, timeout=5).read())
 
 def _cache(key: str, ttl: int = 1800):
     """Decorator-style: return cached value if fresh, else None."""

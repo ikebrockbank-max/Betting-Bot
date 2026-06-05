@@ -58,9 +58,12 @@ jobs:
         run: |
           SPORTS="${{ github.event.inputs.sports }}"
           FORCE="${{ github.event.inputs.force }}"
-          CMD="python3 scanner_power_parlay.py"
+          # Default to MLB + WNBA — NBA stats.nba.com times out on GitHub Actions
+          # runners (each lookup takes 12s → fills the 25-min budget). Re-enable
+          # NBA by passing sports input manually when needed.
+          CMD="python3 scanner_power_parlay.py --sports MLB WNBA"
           if [ -n "$SPORTS" ]; then
-            CMD="$CMD --sports $SPORTS"
+            CMD="python3 scanner_power_parlay.py --sports $SPORTS"
           fi
           if [ "$FORCE" = "true" ]; then
             CMD="$CMD --force"
