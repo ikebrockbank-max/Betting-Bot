@@ -36,7 +36,9 @@ PP_PAYOUTS = {2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0}
 
 KELLY_FRACTION = 0.25   # 25% fractional Kelly — conservative for high-variance parlays
 MAX_OVERLAP    = 1      # max players shared between any two parlays
-ELITE_P_HIT    = 0.72   # picks above this can appear in 2 parlays (truly elite signal)
+ELITE_P_HIT    = 1.01   # disabled — no player appears in more than 1 parlay ever
+                         # (Suzuki 93% p_hit but 2 walks lesson: even "locks" miss,
+                         #  and one miss killing 3 parlays defeats the purpose of a portfolio)
 MAX_RISK_PCT   = 0.80   # never allocate more than 80% of bankroll across all parlays
 POOL_LIMIT     = 25     # only consider top-N picks by p_hit when generating combos
 
