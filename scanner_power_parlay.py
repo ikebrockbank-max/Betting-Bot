@@ -35,7 +35,7 @@ load_dotenv()
 # ── Config ─────────────────────────────────────────────────────────────────────
 LEAGUE_IDS = {"NBA": 7, "MLB": 2, "WNBA": 3, "TENNIS": 5, "SOCCER": 82, "NHL": 8}
 
-PP_PAYOUTS   = {2: 3.0, 3: 5.0, 4: 10.0, 5: 20.0}
+PP_PAYOUTS   = {2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0}
 PP_BREAKEVEN = {n: 1 / p for n, p in PP_PAYOUTS.items()}  # fraction parlay must hit
 
 MIN_CONF      = 0.62   # minimum individual confidence to include

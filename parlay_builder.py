@@ -32,7 +32,7 @@ import math
 from typing import Optional
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-PP_PAYOUTS = {2: 3.0, 3: 5.0, 4: 10.0, 5: 20.0}
+PP_PAYOUTS = {2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0}
 
 KELLY_FRACTION = 0.25   # 25% fractional Kelly — conservative for high-variance parlays
 MAX_OVERLAP    = 1      # max players shared between any two parlays
@@ -178,8 +178,12 @@ def build_diverse_parlays(
             continue
         payout = PP_PAYOUTS.get(n_legs, 20.0)
         for combo in itertools.combinations(pool, n_legs):
+            # ── PrizePicks rule: same player can't appear twice in one parlay ───
+            player_names = [leg["player"] for leg in combo]
+            if len(player_names) != len(set(player_names)):
+                continue
+
             # ── PrizePicks rule: can't parlay players all from the same team ─────
-            # If we know at least 2 legs' teams and they're all identical → reject.
             known_teams = [leg.get("player_team", "").strip() for leg in combo
                            if leg.get("player_team", "").strip()]
             if len(known_teams) >= 2 and len(set(known_teams)) == 1:
