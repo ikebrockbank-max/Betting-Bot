@@ -66,17 +66,52 @@ TIER_MAX_BET = {
 MIN_BET = 1.00   # minimum bet in dollars
 MIN_EV  = 0.03   # min 3% EV to include any parlay
 
+# Quality gates — all three must pass for a pick to enter a parlay
+MIN_CONF_PARLAY  = 0.65   # composite model confidence floor (raised from 0.62)
+MIN_HIT_RATE     = 0.62   # empirical hit rate floor — model can't override real history
+MIN_P_HIT_PARLAY = 0.68   # model probability floor (raised from 0.55)
+# Max gap the model probability can exceed empirical hit rate.
+# If model says 93% but history says 60%, we cap p_hit at 75%.
+MAX_MODEL_OVERREACH = 0.15
+
 
 def _get_p_hit(pick: dict) -> float:
-    """Best available P(hit) estimate for a single leg."""
-    direction = pick.get("direction", "OVER")
-    p_over  = pick.get("p_over")
-    p_under = pick.get("p_under")
-    if direction == "OVER"  and p_over  and 0.05 < p_over  < 0.99:
-        return p_over
-    if direction == "UNDER" and p_under and 0.05 < p_under < 0.99:
-        return p_under
-    return pick.get("confidence", 0.62)
+    """
+    Best available P(hit) estimate for a single leg.
+
+    Priority:
+      1. Model probability (p_over / p_under from distribution engine).
+      2. Confidence score as fallback when model hasn't set p_over/p_under.
+
+    In both cases, the result is capped at hit_rate + MAX_MODEL_OVERREACH to
+    prevent the Gaussian or zero-inflated model from being wildly overconfident
+    relative to what the player has actually done historically.
+
+    Example: Cameron Brink OVER 13.5 PRA — model gives 96% (Gaussian on 22.99 avg),
+    but empirical hit rate is 60%. Cap: 60% + 15% = 75%. That's what we use.
+    """
+    direction  = pick.get("direction", "OVER")
+    p_over     = pick.get("p_over")
+    p_under    = pick.get("p_under")
+    hit_rate   = pick.get("hit_rate", 0.0)
+
+    # Get raw model probability
+    if direction == "OVER" and p_over and 0.05 < p_over < 0.99:
+        model_p = p_over
+    elif direction == "UNDER" and p_under and 0.05 < p_under < 0.99:
+        model_p = p_under
+    else:
+        # No model probability — fall back to confidence, capped by hit rate
+        conf = pick.get("confidence", 0.62)
+        if hit_rate > 0.10:
+            return min(conf, hit_rate + MAX_MODEL_OVERREACH)
+        return conf
+
+    # Cap: model can't claim more than hit_rate + MAX_MODEL_OVERREACH
+    if hit_rate > 0.10:
+        model_p = min(model_p, hit_rate + MAX_MODEL_OVERREACH)
+
+    return model_p
 
 
 def kelly_size(p_win: float, payout_multiple: float, bankroll: float,
@@ -159,10 +194,15 @@ def build_diverse_parlays(
     if not scored_picks:
         return []
 
-    # Filter eligible picks
+    # Filter eligible picks — all three gates must pass:
+    #   1. Composite model confidence ≥ 65%
+    #   2. Empirical hit rate ≥ 62%  (historical evidence floor — model can't override)
+    #   3. Model probability ≥ 68%   (after hit_rate cap applied in _get_p_hit)
     eligible = [
         p for p in scored_picks
-        if p.get("confidence", 0) >= 0.62 and _get_p_hit(p) >= 0.55
+        if p.get("confidence", 0) >= MIN_CONF_PARLAY
+        and p.get("hit_rate", 0) >= MIN_HIT_RATE
+        and _get_p_hit(p) >= MIN_P_HIT_PARLAY
     ]
     eligible.sort(key=_get_p_hit, reverse=True)
     pool = eligible[:POOL_LIMIT]

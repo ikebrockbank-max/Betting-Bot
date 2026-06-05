@@ -38,7 +38,7 @@ LEAGUE_IDS = {"NBA": 7, "MLB": 2, "WNBA": 3, "TENNIS": 5, "SOCCER": 82, "NHL": 8
 PP_PAYOUTS   = {2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0}
 PP_BREAKEVEN = {n: 1 / p for n, p in PP_PAYOUTS.items()}  # fraction parlay must hit
 
-MIN_CONF      = 0.62   # minimum individual confidence to include
+MIN_CONF      = 0.65   # minimum individual confidence to include
 MIN_EDGE_PCT  = 0.08   # minimum 8% gap between player avg and PP line
 MIN_GAMES       = 6    # minimum game history required (MLB needs 6+ starts for reliability)
 MIN_GAMES_NBA   = 8    # NBA needs more games for stability
@@ -1598,7 +1598,7 @@ def score_pick(stats: dict, pick: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 MIN_EV = 0.03    # minimum 3% positive EV to include a parlay (+$0.03 per $1 wagered)
-MIN_P_HIT = 0.55 # minimum per-leg probability (distribution model or confidence fallback)
+MIN_P_HIT = 0.68 # minimum per-leg probability (distribution model or confidence fallback)
 
 
 def _get_p_hit(pick: dict) -> float:
@@ -1637,10 +1637,12 @@ def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[
     - p_hit >= MIN_P_HIT (probability model agrees line is clearable)
     - Parlay EV >= MIN_EV (positive expected value, not just positive probability)
     """
-    # Filter: both qualitative model (confidence) AND probability model (p_hit) agree
+    # Filter: qualitative model, empirical history, AND probability model must all agree
     eligible = [
         p for p in scored_picks
-        if p["confidence"] >= MIN_CONF and _get_p_hit(p) >= MIN_P_HIT
+        if p["confidence"] >= MIN_CONF
+        and p.get("hit_rate", 0) >= 0.62        # historical floor — model can't override
+        and _get_p_hit(p) >= MIN_P_HIT
     ]
     eligible.sort(key=lambda x: _get_p_hit(x), reverse=True)
 
