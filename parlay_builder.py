@@ -178,6 +178,13 @@ def build_diverse_parlays(
             continue
         payout = PP_PAYOUTS.get(n_legs, 20.0)
         for combo in itertools.combinations(pool, n_legs):
+            # ── PrizePicks rule: can't parlay players all from the same team ─────
+            # If we know at least 2 legs' teams and they're all identical → reject.
+            known_teams = [leg.get("player_team", "").strip() for leg in combo
+                           if leg.get("player_team", "").strip()]
+            if len(known_teams) >= 2 and len(set(known_teams)) == 1:
+                continue
+
             corr = _correlation_factor(list(combo))
             ev, p_win, p_indep, _ = _combo_ev(combo, corr)
             if ev < MIN_EV:
