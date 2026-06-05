@@ -1,0 +1,76 @@
+name: Power Parlay Scanner (every 4 hours)
+
+on:
+  schedule:
+    # Runs at 10 AM, 2 PM, 6 PM, 10 PM ET (14:00, 18:00, 22:00, 02:00 UTC)
+    # Timed to catch morning lines, afternoon updates, pre-game edges, and late lines
+    - cron: '0 14 * * *'   # 10 AM ET — morning lines open
+    - cron: '0 18 * * *'   # 2 PM ET  — afternoon updates
+    - cron: '0 22 * * *'   # 6 PM ET  — pre-game prime time
+    - cron: '0 2  * * *'   # 10 PM ET — late games / next day lines
+  workflow_dispatch:        # Manual trigger from GitHub Actions UI
+    inputs:
+      sports:
+        description: 'Sports to scan (space-separated: NBA MLB WNBA TENNIS SOCCER)'
+        required: false
+        default: ''
+      force:
+        description: 'Force resend even if picks were recently sent'
+        required: false
+        default: 'false'
+
+jobs:
+  power-parlay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore state cache (parlay dedup + stat caches)
+        uses: actions/cache@v4
+        with:
+          path: logs/
+          key: parlay-state-${{ github.run_id }}
+          restore-keys: |
+            parlay-state-
+            scanner-state-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Power Parlay Scanner
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          DISCORD_WEBHOOK_PREMIUM: ${{ secrets.DISCORD_WEBHOOK_PREMIUM }}
+          DISCORD_WEBHOOK_FREE: ${{ secrets.DISCORD_WEBHOOK_FREE }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+          KALSHI_PRIVATE_KEY_BASE64: ${{ secrets.KALSHI_PRIVATE_KEY_BASE64 }}
+        run: |
+          SPORTS="${{ github.event.inputs.sports }}"
+          FORCE="${{ github.event.inputs.force }}"
+          CMD="python3 scanner_power_parlay.py"
+          if [ -n "$SPORTS" ]; then
+            CMD="$CMD --sports $SPORTS"
+          fi
+          if [ "$FORCE" = "true" ]; then
+            CMD="$CMD --force"
+          fi
+          echo "Running: $CMD"
+          $CMD
+
+      - name: Save state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: logs/
+          key: parlay-state-${{ github.run_id }}
