@@ -63,8 +63,43 @@ def _sb_request(method: str, path: str, body=None, params: str = "") -> list | d
         print(f"[calibration] Supabase {method} {path}: {e}")
         return None
 
+def _sb_upsert_table(table: str, row: dict) -> bool:
+    """Generic upsert to any table."""
+    req = urllib.request.Request(
+        f"{_SB_URL}/rest/v1/{table}",
+        data=json.dumps(row).encode(),
+        headers={**_sb_headers(), "Prefer": "resolution=merge-duplicates"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception as e:
+        print(f"[calibration] upsert to {table} failed: {e}")
+        return False
+
+def _sb_patch_table(table: str, params: str, updates: dict) -> bool:
+    """Generic PATCH to any table."""
+    req = urllib.request.Request(
+        f"{_SB_URL}/rest/v1/{table}?{params}",
+        data=json.dumps(updates).encode(),
+        headers=_sb_headers(),
+        method="PATCH",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception as e:
+        print(f"[calibration] patch {table} failed: {e}")
+        return False
+
+def _sb_fetch_table(table: str, params: str = "select=*") -> list[dict]:
+    """Generic fetch from any table."""
+    result = _sb_request("GET", table, params=params)
+    return result if isinstance(result, list) else []
+
 def _sb_upsert(row: dict) -> bool:
-    """Insert or update a row (conflict on player+stat_type+pick_date)."""
+    """Insert or update a pick_log row."""
     req = urllib.request.Request(
         f"{_SB_URL}/rest/v1/{_TABLE}",
         data=json.dumps(row).encode(),
@@ -169,13 +204,242 @@ def log_pick(result: dict):
             _local_save(entries)
 
 
+def log_parlay(parlay: dict, parlay_num: int, parlay_date: str = None):
+    """
+    Store a parlay from the Kelly portfolio for P&L tracking.
+    Called after build_diverse_parlays() in scanner_power_parlay.run().
+    """
+    if parlay_date is None:
+        parlay_date = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%d")
+
+    legs_data = []
+    for leg in parlay.get("leg_summary", []):
+        legs_data.append({
+            "player":    leg["player"],
+            "stat_type": leg["stat_type"],
+            "direction": leg["direction"],
+            "line":      leg["line"],
+            "p_hit":     leg.get("p_hit", 0),
+            "hit_rate":  leg.get("hit_rate", 0),
+        })
+
+    row = {
+        "parlay_date":      parlay_date,
+        "parlay_num":       parlay_num,
+        "n_legs":           parlay["n_legs"],
+        "payout_multiple":  parlay["payout"],
+        "bet_size":         parlay.get("bet_size", 0),
+        "win_amount":       parlay.get("win_amount", 0),
+        "p_win":            parlay.get("p_win", 0),
+        "ev_pct":           parlay.get("ev_pct", 0),
+        "legs":             json.dumps(legs_data),
+        "resolved":         False,
+    }
+
+    if _sb_available():
+        _sb_upsert_table("parlay_log", row)
+
+
+def resolve_parlays(target_date: str) -> list[dict]:
+    """
+    After individual picks are resolved, check each parlay.
+    A parlay hits if ALL legs hit. Returns list of resolved parlay summaries.
+    """
+    if not _sb_available():
+        return []
+
+    parlays = _sb_fetch_table("parlay_log",
+                               f"select=*&parlay_date=eq.{target_date}&resolved=eq.false")
+    if not parlays:
+        return []
+
+    resolved_parlays = []
+    for p in parlays:
+        raw_legs = p.get("legs")
+        legs = json.loads(raw_legs) if isinstance(raw_legs, str) else (raw_legs or [])
+        if not legs:
+            continue
+
+        all_hit   = True
+        all_known = True
+        killed_by = None
+
+        for leg in legs:
+            player    = leg["player"]
+            stat_type = leg["stat_type"]
+            # Look up the resolved result from pick_log
+            picks = _sb_fetch_table("pick_log",
+                f"select=result,actual_value&pick_date=eq.{target_date}"
+                f"&player=eq.{urllib.parse.quote(player)}"
+                f"&stat_type=eq.{urllib.parse.quote(stat_type)}")
+            if not picks or picks[0].get("result") is None:
+                all_known = False
+                break
+            if picks[0]["result"] == "miss":
+                all_hit = False
+                if not killed_by:
+                    actual = picks[0].get("actual_value", "?")
+                    killed_by = f"{player} {leg['direction']} {leg['line']} {stat_type} (got {actual})"
+
+        if not all_known:
+            continue  # some legs unresolved — skip for now
+
+        result       = "hit" if all_hit else "miss"
+        bet          = float(p.get("bet_size") or 0)
+        win          = float(p.get("win_amount") or 0)
+        actual_profit = round(win - bet, 2) if all_hit else round(-bet, 2)
+
+        _sb_patch_table("parlay_log",
+            f"parlay_date=eq.{target_date}&parlay_num=eq.{p['parlay_num']}",
+            {"result": result, "resolved": True,
+             "actual_profit": actual_profit, "killed_by": killed_by})
+
+        resolved_parlays.append({
+            "num":     p["parlay_num"],
+            "n_legs":  p["n_legs"],
+            "bet":     bet,
+            "win":     win,
+            "result":  result,
+            "profit":  actual_profit,
+            "killed_by": killed_by,
+            "p_win":   p.get("p_win", 0),
+        })
+
+    return resolved_parlays
+
+
+def update_stat_calibration():
+    """
+    Recompute per-sport/stat-type accuracy from all resolved picks.
+    Writes to stat_calibration table. Called after update_results().
+    Used by score_pick() to apply stat-specific confidence corrections.
+    """
+    if not _sb_available():
+        return
+
+    resolved = _sb_fetch_table("pick_log",
+        "select=sport,stat_type,confidence,result&resolved=eq.true&limit=5000")
+    if not resolved:
+        return
+
+    # Group by sport + stat_type
+    by_stat: dict[tuple, dict] = {}
+    for r in resolved:
+        key = (r.get("sport", ""), r.get("stat_type", ""))
+        if not all(key):
+            continue
+        by_stat.setdefault(key, {"hits": 0, "total": 0, "conf_sum": 0.0})
+        by_stat[key]["total"] += 1
+        by_stat[key]["conf_sum"] += float(r.get("confidence") or 0)
+        if r.get("result") == "hit":
+            by_stat[key]["hits"] += 1
+
+    for (sport, stat_type), d in by_stat.items():
+        if d["total"] < 10:
+            continue
+        real_rate   = round(d["hits"] / d["total"], 4)
+        avg_conf    = round(d["conf_sum"] / d["total"], 4)
+        overconf    = round(avg_conf - real_rate, 4)
+        _sb_upsert_table("stat_calibration", {
+            "sport":          sport,
+            "stat_type":      stat_type,
+            "n_picks":        d["total"],
+            "n_hits":         d["hits"],
+            "real_hit_rate":  real_rate,
+            "avg_confidence": avg_conf,
+            "overconfidence": overconf,
+        })
+
+
+def get_stat_calibration(sport: str, stat_type: str) -> dict | None:
+    """
+    Return calibration data for a specific sport/stat_type.
+    Used in score_pick() to apply a stat-specific confidence correction.
+
+    Returns: {"real_hit_rate": 0.52, "avg_confidence": 0.74, "overconfidence": 0.22, "n": 34}
+    Returns None if insufficient data (< 15 picks).
+    """
+    if not _sb_available():
+        return None
+    rows = _sb_fetch_table("stat_calibration",
+        f"select=*&sport=eq.{sport}&stat_type=eq.{urllib.parse.quote(stat_type)}")
+    if not rows or rows[0].get("n_picks", 0) < 15:
+        return None
+    r = rows[0]
+    return {
+        "real_hit_rate":  r.get("real_hit_rate"),
+        "avg_confidence": r.get("avg_confidence"),
+        "overconfidence": r.get("overconfidence"),
+        "n":              r.get("n_picks"),
+    }
+
+
+def _send_results_notification(target_date: str, pick_results: list[dict],
+                                parlay_results: list[dict]):
+    """
+    Push a results summary via ntfy after the morning resolve job.
+    Shows exactly which picks hit/missed, why parlays missed, and P&L.
+    """
+    try:
+        from notify import send_push
+    except Exception:
+        return
+
+    hits    = sum(1 for p in pick_results if p.get("hit"))
+    total   = len(pick_results)
+    p_hits  = sum(1 for p in parlay_results if p.get("result") == "hit")
+    p_total = len(parlay_results)
+    net_pnl = sum(p.get("profit", 0) for p in parlay_results)
+    pnl_str = f"+${net_pnl:.2f}" if net_pnl >= 0 else f"-${abs(net_pnl):.2f}"
+
+    # Format date nicely
+    try:
+        dt   = datetime.strptime(target_date, "%Y-%m-%d")
+        date_str = dt.strftime("%b %-d")
+    except Exception:
+        date_str = target_date
+
+    title = (f"📊 {date_str} Results — "
+             f"{p_hits}/{p_total} parlays hit, {pnl_str}")
+
+    lines = []
+
+    # Parlay breakdown
+    if parlay_results:
+        for p in sorted(parlay_results, key=lambda x: x["num"]):
+            icon   = "✅" if p["result"] == "hit" else "❌"
+            profit = f"+${p['profit']:.2f}" if p["profit"] >= 0 else f"-${abs(p['profit']):.2f}"
+            lines.append(f"{icon} P{p['num']} ({p['n_legs']}-pick ${p['bet']:.0f}): {profit}")
+            if p["result"] == "miss" and p.get("killed_by"):
+                lines.append(f"   💀 {p['killed_by']}")
+        lines.append("")
+
+    # Individual pick summary
+    lines.append(f"Picks: {hits}/{total} hit ({int(hits/total*100) if total else 0}%)")
+    for p in pick_results:
+        if p.get("hit") is None:
+            continue
+        icon   = "✅" if p["hit"] else "❌"
+        actual = f" (got {p.get('actual', '?')})" if not p["hit"] else ""
+        lines.append(
+            f"  {icon} {p['player']} {p['direction']} {p['line']} {p['stat_type']}{actual}"
+        )
+
+    body = "\n".join(lines)
+    try:
+        send_push(body, title=title)
+        print(f"[calibration] Results notification sent: {title}")
+    except Exception as e:
+        print(f"[calibration] Results push failed: {e}")
+
+
 def update_results(target_date: str = None):
     """
     Fetch actual box-score results for all unresolved picks on target_date.
-    Marks each pick hit/miss and stores the actual value.
+    Marks each pick hit/miss, resolves parlays, updates stat calibration,
+    and sends a push notification with the full P&L summary.
 
-    Run this the day AFTER picks are made (next morning).
-    GitHub Actions: add a daily 8am ET run of this function.
+    Run this the morning AFTER picks are made (9 AM ET via GitHub Actions).
     """
     if target_date is None:
         yesterday = datetime.now(timezone.utc) - timedelta(hours=4) - timedelta(days=1)
@@ -251,6 +515,42 @@ def update_results(target_date: str = None):
         _local_save(all_entries)
 
     print(f"Resolved {resolved_count}/{len(pending)} picks for {target_date}.")
+
+    # ── Step 2: Resolve parlays (check if all legs hit) ───────────────────────
+    parlay_results = []
+    if _sb_available() and resolved_count > 0:
+        print("Resolving parlays...")
+        parlay_results = resolve_parlays(target_date)
+        p_hits = sum(1 for p in parlay_results if p.get("result") == "hit")
+        net    = sum(p.get("profit", 0) for p in parlay_results)
+        pnl_s  = f"+${net:.2f}" if net >= 0 else f"-${abs(net):.2f}"
+        print(f"  Parlays: {p_hits}/{len(parlay_results)} hit  |  Net P&L: {pnl_s}")
+
+    # ── Step 3: Update per-stat calibration table ─────────────────────────────
+    if _sb_available():
+        try:
+            update_stat_calibration()
+            print("Stat calibration table updated.")
+        except Exception as e:
+            print(f"Stat calibration update failed: {e}")
+
+    # ── Step 4: Send results push notification ────────────────────────────────
+    # Build pick_results list for the notification
+    pick_results_for_notif = []
+    for e in pending:
+        if e.get("result") is not None or e.get("actual") is not None:
+            pick_results_for_notif.append({
+                "player":    e["player"],
+                "direction": e["direction"],
+                "line":      e["line"],
+                "stat_type": e["stat_type"],
+                "hit":       e.get("result") == "hit" if e.get("result") else e.get("hit"),
+                "actual":    e.get("actual_value") or e.get("actual"),
+            })
+
+    if resolved_count > 0:
+        _send_results_notification(target_date, pick_results_for_notif, parlay_results)
+
     return resolved_count
 
 

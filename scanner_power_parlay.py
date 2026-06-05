@@ -1393,6 +1393,33 @@ def score_pick(stats: dict, pick: dict) -> dict:
     except Exception:
         pass
 
+    # ── Per-stat-type calibration correction ──────────────────────────────────
+    # After enough data accumulates in Supabase, the model learns stat-specific
+    # overconfidence. E.g. "Singles is +25% overconfident based on 80 resolved picks."
+    # Apply a blend toward the historical real_hit_rate, weighted by sample size.
+    #
+    # This runs AFTER the bucket calibration above, so it's additive.
+    # Only fires when stat_calibration table has ≥ 15 picks for this stat type.
+    try:
+        from calibration_tracker import get_stat_calibration as _gsc
+        _sc = _gsc(sport, stat_type)
+        if _sc and _sc.get("overconfidence") is not None:
+            _overconf  = _sc["overconfidence"]   # positive = model too high
+            _sc_n      = _sc.get("n", 0)
+            # Blend weight: 0% at 15 picks, up to 60% at 100+ picks
+            _sc_blend  = min(0.60, max(0.0, (_sc_n - 15) / 85.0))
+            if _sc_blend > 0.05 and abs(_overconf) > 0.03:
+                _sc_target  = _sc["real_hit_rate"]
+                _sc_cal     = round(confidence * (1 - _sc_blend) + _sc_target * _sc_blend, 3)
+                _sc_dir     = "↓" if _sc_cal < confidence else "↑"
+                cal_note    = (cal_note + " " if cal_note else "") + (
+                    f"StatCal{_sc_dir} {confidence:.0%}→{_sc_cal:.0%} "
+                    f"({stat_type} hist {_sc_target:.0%}, n={_sc_n})"
+                )
+                confidence = _sc_cal
+    except Exception:
+        pass
+
     # ── Probability distribution engine ──────────────────────────────────────────
     # Model the stat as normally distributed around the projection.
     # P(over line) = 1 − Φ((line − projection) / σ)
@@ -2182,11 +2209,12 @@ def run(sports: list[str] = None, force: bool = False):
     _send_notifications(scored[:8], kelly_parlays if kelly_parlays else parlays,
                         bankroll=bankroll)
 
-    # 8. Log picks for result tracking + calibration
-    # Each scored pick is saved to calibration_log.json so update_results()
-    # can fetch the actual outcome next day and mark it hit/miss.
+    # 8. Log picks + parlays for result tracking + calibration
     try:
-        from calibration_tracker import log_pick as _log_pick
+        from calibration_tracker import log_pick as _log_pick, log_parlay as _log_parlay
+        today = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%d")
+
+        # Log individual picks
         logged = 0
         for p in scored:
             try:
@@ -2195,7 +2223,17 @@ def run(sports: list[str] = None, force: bool = False):
             except Exception:
                 pass
         if logged:
-            _log(f"Logged {logged} picks for calibration tracking.")
+            _log(f"Logged {logged} picks to Supabase for calibration.")
+
+        # Log each parlay from the Kelly portfolio for P&L tracking
+        final_parlays = kelly_parlays if kelly_parlays else []
+        for i, kp in enumerate(final_parlays, 1):
+            try:
+                _log_parlay(kp, parlay_num=i, parlay_date=today)
+            except Exception:
+                pass
+        if final_parlays:
+            _log(f"Logged {len(final_parlays)} parlays to Supabase for P&L tracking.")
     except Exception:
         pass
 
