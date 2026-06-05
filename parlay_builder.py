@@ -68,6 +68,24 @@ TIER_MAX_BET = {
 MIN_BET = 1.00   # minimum bet in dollars
 MIN_EV  = 0.03   # min 3% EV to include any parlay
 
+# ── Stat types excluded from parlays ──────────────────────────────────────────
+# These stat types have systematic model overconfidence (measured confidence minus
+# real hit rate consistently > 10 percentage points in back-testing):
+#
+#   Pitcher Fantasy Score  (+21% overconfident) — composite: K + outs + ERA quality
+#   Hitter Fantasy Score   (+10% overconfident) — composite: hits + TB + R + RBI
+#   Hits+Runs+RBIs         (+18% overconfident) — composite: 3 uncorrelated stats
+#   Hitter Strikeouts      (+15% overconfident) — too situational, model can't price well
+#
+# We keep these in the initial scan / Discord report as informational,
+# but they are filtered out before any parlay is constructed.
+EXCLUDED_STAT_TYPES = {
+    "Pitcher Fantasy Score",
+    "Hitter Fantasy Score",
+    "Hits+Runs+RBIs",
+    "Hitter Strikeouts",
+}
+
 # Quality gates — all three must pass for a pick to enter a parlay
 MIN_CONF_PARLAY  = 0.65   # composite model confidence floor (raised from 0.62)
 MIN_HIT_RATE     = 0.62   # empirical hit rate floor — model can't override real history
@@ -140,22 +158,45 @@ def _correlation_factor(combo: list[dict]) -> float:
     """
     Estimate correlation adjustment for a combination of picks.
 
-    Tries the full correlation model first; falls back to a simple
-    same-game / same-team heuristic.
+    Layers applied in order (multiplicative):
 
-    Returns a multiplier: < 1.0 = correlated (reduce p_win), > 1.0 = anti-correlated bonus.
+      1. Same-team batters (vs same pitcher) → ×0.88 per extra teammate
+         Two Cubs batters face the same pitcher — pitcher dominance or wildness
+         affects BOTH. Measured inter-batter correlation ≈ 0.12–0.18.
+         Applied BEFORE the game-state model so it can't be swallowed by it.
+
+      2. Full game-state model (pitcher skill × lineup cascade × park)
+         Uses data.mlb_game_state when available.
+
+      3. Fallback: different-team same-game → ×0.92, different games → 1.0
+
+    Returns a multiplier: < 1.0 = correlated (reduces p_win estimate).
     """
+    # ── Layer 1: Same-team batter correlation (always applies first) ──────────
+    team_counts: dict[str, int] = {}
+    for p in combo:
+        team = p.get("player_team", "").strip()
+        if team:
+            team_counts[team] = team_counts.get(team, 0) + 1
+
+    same_team_factor = 1.0
+    for team, count in team_counts.items():
+        if count >= 2:
+            # 0.88 per extra same-team player: 2 players → ×0.88, 3 → ×0.77
+            same_team_factor *= 0.88 ** (count - 1)
+
+    # ── Layer 2: Full game-state model ────────────────────────────────────────
+    game_state_factor = 1.0
     try:
         from data.mlb_game_state import joint_game_correlation_factor as _jcf
-        return _jcf(combo)
+        game_state_factor = _jcf(combo)
     except Exception:
-        pass
+        # ── Layer 3: Heuristic fallback ───────────────────────────────────────
+        game_ids = [p.get("game_id", "") for p in combo if p.get("game_id")]
+        if len(game_ids) != len(set(game_ids)):
+            game_state_factor = 0.92  # different teams, same game
 
-    # Simple heuristic fallback
-    game_ids = [p.get("game_id", "") for p in combo if p.get("game_id")]
-    if len(game_ids) != len(set(game_ids)):  # any duplicate game_id = same game
-        return 0.90
-    return 1.0
+    return round(same_team_factor * game_state_factor, 3)
 
 
 def _combo_ev(combo: tuple, corr_factor: float) -> float:
@@ -196,15 +237,17 @@ def build_diverse_parlays(
     if not scored_picks:
         return []
 
-    # Filter eligible picks — all three gates must pass:
+    # Filter eligible picks — ALL gates must pass:
     #   1. Composite model confidence ≥ 65%
     #   2. Empirical hit rate ≥ 62%  (historical evidence floor — model can't override)
     #   3. Model probability ≥ 68%   (after hit_rate cap applied in _get_p_hit)
+    #   4. Stat type not in EXCLUDED_STAT_TYPES (composite/overconfident stat types)
     eligible = [
         p for p in scored_picks
         if p.get("confidence", 0) >= MIN_CONF_PARLAY
         and p.get("hit_rate", 0) >= MIN_HIT_RATE
         and _get_p_hit(p) >= MIN_P_HIT_PARLAY
+        and p.get("stat_type", "") not in EXCLUDED_STAT_TYPES
     ]
     eligible.sort(key=_get_p_hit, reverse=True)
     pool = eligible[:POOL_LIMIT]

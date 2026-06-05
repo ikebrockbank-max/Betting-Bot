@@ -3,12 +3,13 @@ name: Power Parlay Scanner (every 4 hours)
 on:
   schedule:
     # Runs at 10 AM, 2 PM, 6 PM, 10 PM ET (14:00, 18:00, 22:00, 02:00 UTC)
-    # Timed to catch morning lines, afternoon updates, pre-game edges, and late lines
     - cron: '0 14 * * *'   # 10 AM ET — morning lines open
     - cron: '0 18 * * *'   # 2 PM ET  — afternoon updates
     - cron: '0 22 * * *'   # 6 PM ET  — pre-game prime time
     - cron: '0 2  * * *'   # 10 PM ET — late games / next day lines
-  workflow_dispatch:        # Manual trigger from GitHub Actions UI
+    # Results update: 9 AM ET every day — resolves yesterday's picks in Supabase
+    - cron: '0 13 * * *'   # 9 AM ET  — fetch yesterday's box scores, mark hit/miss
+  workflow_dispatch:
     inputs:
       sports:
         description: 'Sports to scan (space-separated: NBA MLB WNBA TENNIS SOCCER)'
@@ -18,11 +19,29 @@ on:
         description: 'Force resend even if picks were recently sent'
         required: false
         default: 'false'
+      update_results:
+        description: 'Run results updater instead of scanner'
+        required: false
+        default: 'false'
+
+# Shared env block — all jobs inherit these secrets
+env:
+  SUPABASE_URL:      https://gggozciyvjeqjnmufigp.supabase.co
+  SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+  NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
+  ODDS_API_KEY:      ${{ secrets.ODDS_API_KEY }}
+  OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+  DISCORD_WEBHOOK_PREMIUM: ${{ secrets.DISCORD_WEBHOOK_PREMIUM }}
+  DISCORD_WEBHOOK_FREE:    ${{ secrets.DISCORD_WEBHOOK_FREE }}
 
 jobs:
   power-parlay:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Skip this job if it's the 9 AM results-update run
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule != '0 13 * * *'
 
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +50,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore state cache (parlay dedup + stat caches)
+      - name: Restore state cache (dedup + stat caches)
         uses: actions/cache@v4
         with:
           path: logs/
@@ -45,22 +64,18 @@ jobs:
 
       - name: Run Power Parlay Scanner
         env:
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-          DISCORD_WEBHOOK_PREMIUM: ${{ secrets.DISCORD_WEBHOOK_PREMIUM }}
-          DISCORD_WEBHOOK_FREE: ${{ secrets.DISCORD_WEBHOOK_FREE }}
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
-          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
-          KALSHI_PRIVATE_KEY_BASE64: ${{ secrets.KALSHI_PRIVATE_KEY_BASE64 }}
+          BANKROLL: ${{ secrets.BANKROLL }}
         run: |
           SPORTS="${{ github.event.inputs.sports }}"
           FORCE="${{ github.event.inputs.force }}"
-          # Default to MLB + WNBA — NBA stats.nba.com times out on GitHub Actions
-          # runners (each lookup takes 12s → fills the 25-min budget). Re-enable
-          # NBA by passing sports input manually when needed.
+          UPDATE="${{ github.event.inputs.update_results }}"
+
+          if [ "$UPDATE" = "true" ]; then
+            echo "Running results updater..."
+            python3 calibration_tracker.py update
+            exit 0
+          fi
+
           CMD="python3 scanner_power_parlay.py --sports MLB WNBA"
           if [ -n "$SPORTS" ]; then
             CMD="python3 scanner_power_parlay.py --sports $SPORTS"
@@ -77,3 +92,25 @@ jobs:
         with:
           path: logs/
           key: parlay-state-${{ github.run_id }}
+
+  update-results:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Only runs on the 9 AM cron — resolves yesterday's picks
+    if: github.event.schedule == '0 13 * * *'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Resolve yesterday's picks
+        run: |
+          echo "Fetching actual results and marking hit/miss in Supabase..."
+          python3 calibration_tracker.py update
+          echo "Done."

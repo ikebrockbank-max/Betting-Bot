@@ -1482,7 +1482,33 @@ def score_pick(stats: dict, pick: dict) -> dict:
             # nonzero_std=0.0 is falsy — must use explicit None check, not "or" fallback
             _nonzero_std_low = nonzero_std is not None and nonzero_std < 0.3
 
-            if _is_half_line and _nonzero_std_low and stats.get("hit_rate") is not None:
+            # ── Poisson model for rare integer-count stats (X.5 lines) ──────────
+            # Stats like Singles, Hits, HR, RBI follow a Poisson process per game.
+            # P(at least 1) = 1 − e^(−λ)  where λ = avg per game.
+            # The Gaussian/zero-inflated model systematically overstates these
+            # because it's fooled by edge_size (avg >> 0.5) and recent streaks.
+            #
+            # Measured overconfidence (model − real hit rate):
+            #   Singles:  +25%   HR: ~+15%   Hits: +4%
+            #
+            # Fix: for X.5 lines on Poisson-appropriate stat types, use the
+            # Poisson probability directly and blend 70% Poisson / 30% hit_rate.
+            # The blend respects that hot/cold streaks are real (not just noise)
+            # while anchoring to the theoretically correct base rate.
+            _POISSON_STAT_TYPES = {"Singles", "Home Runs", "Stolen Bases"}
+            if (_is_half_line and stat_type in _POISSON_STAT_TYPES
+                    and proj_stat_val and proj_stat_val > 0):
+                _lam = float(proj_stat_val)   # Poisson λ = avg per game
+                _p_pois_over  = 1.0 - _math.exp(-_lam)
+                _p_pois_under = _math.exp(-_lam)
+                _hr = float(stats.get("hit_rate", 0.5))
+                # 70% Poisson (theoretically correct) + 30% empirical hit rate (form signal)
+                _p_ov_blend = 0.70 * _p_pois_over  + 0.30 * _hr
+                _p_un_blend = 0.70 * _p_pois_under + 0.30 * (1.0 - _hr)
+                p_over  = round(max(0.01, min(0.99, _p_ov_blend)), 3)
+                p_under = round(max(0.01, min(0.99, _p_un_blend)), 3)
+
+            elif _is_half_line and _nonzero_std_low and stats.get("hit_rate") is not None:
                 # Use empirical hit rate — it IS P(over X.5) for half-integer lines
                 _hr = float(stats["hit_rate"])
                 p_over  = round(max(0.01, min(0.99, _hr)), 3)
