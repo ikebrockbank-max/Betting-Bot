@@ -1464,7 +1464,8 @@ def score_pick(stats: dict, pick: dict) -> dict:
             # (near-zero variance in non-zero games), use hit_rate directly as
             # p_over/p_under.  That IS the empirical P(stat ≥ 1).
             _is_half_line = abs(line - round(line) - 0.5) < 0.01   # e.g. 0.5, 1.5, 2.5
-            _nonzero_std_low = (nonzero_std or 1.0) < 0.3
+            # nonzero_std=0.0 is falsy — must use explicit None check, not "or" fallback
+            _nonzero_std_low = nonzero_std is not None and nonzero_std < 0.3
 
             if _is_half_line and _nonzero_std_low and stats.get("hit_rate") is not None:
                 # Use empirical hit rate — it IS P(over X.5) for half-integer lines
