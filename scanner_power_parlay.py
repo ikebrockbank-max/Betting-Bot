@@ -2052,6 +2052,24 @@ def run(sports: list[str] = None, force: bool = False):
 
     # 7. Send notifications
     _send_notifications(scored[:8], parlays)
+
+    # 8. Log picks for result tracking + calibration
+    # Each scored pick is saved to calibration_log.json so update_results()
+    # can fetch the actual outcome next day and mark it hit/miss.
+    try:
+        from calibration_tracker import log_pick as _log_pick
+        logged = 0
+        for p in scored:
+            try:
+                _log_pick(p)
+                logged += 1
+            except Exception:
+                pass
+        if logged:
+            _log(f"Logged {logged} picks for calibration tracking.")
+    except Exception:
+        pass
+
     _log("Done.")
 
 

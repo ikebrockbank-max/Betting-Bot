@@ -47,6 +47,7 @@ def main():
     last_pp_report     = 0.0
     last_daily_digest  = ""     # date string "YYYY-MM-DD" of last digest
     last_discord_results = ""  # date string "YYYY-MM-DD" of last results post
+    last_result_update = ""    # date string "YYYY-MM-DD" of last calibration result fetch
     injury_seen: dict  = {}     # in-memory dedup across iterations
     pp_injury_seen: dict = {}   # in-memory dedup for PP injury alerts
 
@@ -156,9 +157,23 @@ def main():
             except Exception:
                 log(f"ERROR during PP pre-game report:\n{traceback.format_exc()}")
 
-        # ── Daily digest — once per day at DAILY_DIGEST_HOUR_UTC ─────────────
+        # ── Calibration result fetch — once per day at 11:00 UTC (7am ET) ──────
+        # Fetches yesterday's actual box score outcomes for every logged pick,
+        # marks each as hit/miss, feeds resolved pairs into correlation_calibrator.
         now_dt = datetime.now(UTC)
         today  = now_dt.strftime("%Y-%m-%d")
+        if now_dt.hour >= 11 and last_result_update != today:
+            try:
+                from calibration_tracker import update_results as _update_results
+                yesterday = (datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+                             - __import__('datetime').timedelta(days=1)).strftime("%Y-%m-%d")
+                _update_results(yesterday)
+                last_result_update = today
+                log(f"Calibration results updated for {yesterday}")
+            except Exception:
+                log(f"ERROR during calibration result update:\n{traceback.format_exc()}")
+
+        # ── Daily digest — once per day at DAILY_DIGEST_HOUR_UTC ─────────────
         if now_dt.hour >= DAILY_DIGEST_HOUR_UTC and last_daily_digest != today:
             try:
                 import daily_digest
