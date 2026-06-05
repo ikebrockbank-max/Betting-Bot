@@ -150,8 +150,9 @@ def kelly_size(p_win: float, payout_multiple: float, bankroll: float,
     full_kelly = (b * p_win - q) / b  # fraction of bankroll
     if full_kelly <= 0:
         return 0.0
-    raw = bankroll * full_kelly * frac
-    return max(MIN_BET, min(MAX_BET, round(raw, 2)))
+    raw     = bankroll * full_kelly * frac
+    max_bet = max(v for v in TIER_MAX_BET.values())   # use highest tier cap as ceiling
+    return max(MIN_BET, min(max_bet, round(raw, 2)))
 
 
 def _correlation_factor(combo: list[dict]) -> float:

@@ -510,6 +510,7 @@ def update_results(target_date: str = None):
 
             if _sb_available():
                 _sb_patch(target_date, player, stat, updates)
+                e.update(updates)   # Mirror into local dict so notification has real results
             else:
                 # Update local entry
                 for entry in all_entries:

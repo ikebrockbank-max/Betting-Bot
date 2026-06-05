@@ -2171,6 +2171,28 @@ def run(sports: list[str] = None, force: bool = False):
 
     _log(f"All scored: {len(scored_all)} | Qualified (≥{int(MIN_CONF*100)}%): {len(scored)}")
 
+    # Log ALL scored picks to Supabase NOW — before any early returns.
+    # This ensures watched picks are always captured for calibration,
+    # even on days with zero qualified picks or all-deduped runs.
+    try:
+        from calibration_tracker import log_pick as _log_pick_early
+        today = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%d")
+        _early_logged_q = 0
+        _early_logged_w = 0
+        for p in scored_all:
+            try:
+                _log_pick_early(p)
+                if p.get("was_qualified"):
+                    _early_logged_q += 1
+                else:
+                    _early_logged_w += 1
+            except Exception:
+                pass
+        if _early_logged_q or _early_logged_w:
+            _log(f"Logged {_early_logged_q} bet picks + {_early_logged_w} watched picks to Supabase.")
+    except Exception:
+        pass
+
     if not scored:
         _log("No qualified picks — nothing to send")
         return
@@ -2231,32 +2253,11 @@ def run(sports: list[str] = None, force: bool = False):
     _send_notifications(scored[:8], kelly_parlays if kelly_parlays else parlays,
                         bankroll=bankroll)
 
-    # 8. Log picks + parlays for result tracking + calibration
-    # Log ALL scored picks (not just qualified ones) so we can validate whether
-    # model confidence is actually predictive across the full 40-90% range.
-    # was_qualified=True marks picks that passed the threshold and were bet.
-    # was_qualified=False marks picks we watched but didn't bet — equally valuable
-    # for calibration (did the 55% picks really hit 55% of the time?).
+    # 8. Log parlays for P&L tracking
+    # (Individual picks were already logged to Supabase above, before early returns)
     try:
-        from calibration_tracker import log_pick as _log_pick, log_parlay as _log_parlay
+        from calibration_tracker import log_parlay as _log_parlay
         today = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%d")
-
-        # Log every scored pick regardless of confidence threshold
-        logged_qualified = 0
-        logged_watched   = 0
-        for p in scored_all:
-            try:
-                _log_pick(p)
-                if p.get("was_qualified"):
-                    logged_qualified += 1
-                else:
-                    logged_watched += 1
-            except Exception:
-                pass
-        if logged_qualified or logged_watched:
-            _log(f"Logged {logged_qualified} bet picks + {logged_watched} watched picks to Supabase.")
-
-        # Log each parlay from the Kelly portfolio for P&L tracking
         final_parlays = kelly_parlays if kelly_parlays else []
         for i, kp in enumerate(final_parlays, 1):
             try:
