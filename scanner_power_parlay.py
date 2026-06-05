@@ -1372,8 +1372,9 @@ def score_pick(stats: dict, pick: dict) -> dict:
     # Blend weight scales with sample size: 0% at 0, ~50% at 50, max 70% at 100+.
     cal_note = ""
     try:
-        from calibration_tracker import get_calibration_adjustments
-        cal = get_calibration_adjustments(min_n=15)
+        from calibration_tracker import (get_calibration_adjustments,
+                                          BOOTSTRAP_MIN_N, BLEND_MAX, BLEND_FULL_N)
+        cal = get_calibration_adjustments()   # uses BOOTSTRAP_MIN_N automatically
         if cal:
             conf_pct_now = int(confidence * 100)
             for label, cdata in cal.items():
@@ -1381,14 +1382,23 @@ def score_pick(stats: dict, pick: dict) -> dict:
                 if lo <= conf_pct_now < hi:
                     hist_rate  = cdata["hist_rate"]
                     n_bucket   = cdata["n"]
-                    blend      = min(0.70, n_bucket / 100)
-                    calibrated = round(confidence * (1 - blend) + hist_rate * blend, 3)
-                    delta_dir  = "↑" if calibrated > confidence else "↓"
-                    cal_note   = (
-                        f"Cal {delta_dir} {confidence:.0%}→{calibrated:.0%} "
-                        f"(hist {hist_rate:.0%}, n={n_bucket})"
-                    )
-                    confidence = calibrated
+                    # Blend formula: ramp from 0% at BOOTSTRAP_MIN_N to BLEND_MAX at BLEND_FULL_N
+                    # At n=5:  blend ≈  0% (barely anything, avoid pure noise)
+                    # At n=10: blend ≈ 14% (modest early correction)
+                    # At n=20: blend ≈ 30% (meaningful correction after ~3 days)
+                    # At n=50: blend ≈ 70% (full weight after ~1 week)
+                    blend = min(BLEND_MAX,
+                                max(0.0, (n_bucket - BOOTSTRAP_MIN_N)
+                                         / (BLEND_FULL_N - BOOTSTRAP_MIN_N)
+                                         * BLEND_MAX))
+                    if blend > 0.02:   # only adjust if blend is meaningful
+                        calibrated = round(confidence * (1 - blend) + hist_rate * blend, 3)
+                        delta_dir  = "↑" if calibrated > confidence else "↓"
+                        cal_note   = (
+                            f"Cal {delta_dir} {confidence:.0%}→{calibrated:.0%} "
+                            f"(hist {hist_rate:.0%}, n={n_bucket}, blend={blend:.0%})"
+                        )
+                        confidence = calibrated
                     break
     except Exception:
         pass
@@ -1401,13 +1411,17 @@ def score_pick(stats: dict, pick: dict) -> dict:
     # This runs AFTER the bucket calibration above, so it's additive.
     # Only fires when stat_calibration table has ≥ 15 picks for this stat type.
     try:
-        from calibration_tracker import get_stat_calibration as _gsc
+        from calibration_tracker import (get_stat_calibration as _gsc,
+                                          BOOTSTRAP_MIN_N, BLEND_MAX, BLEND_FULL_N)
         _sc = _gsc(sport, stat_type)
         if _sc and _sc.get("overconfidence") is not None:
             _overconf  = _sc["overconfidence"]   # positive = model too high
             _sc_n      = _sc.get("n", 0)
-            # Blend weight: 0% at 15 picks, up to 60% at 100+ picks
-            _sc_blend  = min(0.60, max(0.0, (_sc_n - 15) / 85.0))
+            # Same fast-ramp blend formula as bucket calibration
+            _sc_blend  = min(BLEND_MAX,
+                             max(0.0, (_sc_n - BOOTSTRAP_MIN_N)
+                                      / (BLEND_FULL_N - BOOTSTRAP_MIN_N)
+                                      * BLEND_MAX))
             if _sc_blend > 0.05 and abs(_overconf) > 0.03:
                 _sc_target  = _sc["real_hit_rate"]
                 _sc_cal     = round(confidence * (1 - _sc_blend) + _sc_target * _sc_blend, 3)

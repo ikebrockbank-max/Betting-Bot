@@ -30,6 +30,19 @@ _TABLE   = "pick_log"
 # Local fallback path (used when SUPABASE_ANON_KEY not set, e.g. local dev)
 _LOCAL   = Path("logs/calibration_log.json")
 
+# ── Calibration thresholds ─────────────────────────────────────────────────────
+# Week 1: react fast with small samples — better to over-correct than learn nothing.
+# After ~2 weeks (100+ resolved picks) the model has enough data to be more precise.
+# These constants are used everywhere: bucket calibration, stat-type calibration,
+# and the blend weight formula.
+BOOTSTRAP_MIN_N  = 5    # start adjusting after just 5 resolved picks
+STEADY_MIN_N     = 15   # normal threshold once data is sufficient
+# Blend formula: how much weight to give historical data vs current model score.
+# Ramps from 0% at MIN_N picks to MAX_BLEND at BLEND_FULL_N picks.
+# Fast early ramp: reach 50% blend at 20 picks (within first 2-3 days).
+BLEND_MAX        = 0.70  # never override model more than 70%
+BLEND_FULL_N     = 50    # reach max blend at 50 picks (~1 week of data)
+
 
 # ── Supabase REST helpers ──────────────────────────────────────────────────────
 
@@ -335,7 +348,7 @@ def update_stat_calibration():
             by_stat[key]["hits"] += 1
 
     for (sport, stat_type), d in by_stat.items():
-        if d["total"] < 10:
+        if d["total"] < BOOTSTRAP_MIN_N:
             continue
         real_rate   = round(d["hits"] / d["total"], 4)
         avg_conf    = round(d["conf_sum"] / d["total"], 4)
@@ -357,13 +370,13 @@ def get_stat_calibration(sport: str, stat_type: str) -> dict | None:
     Used in score_pick() to apply a stat-specific confidence correction.
 
     Returns: {"real_hit_rate": 0.52, "avg_confidence": 0.74, "overconfidence": 0.22, "n": 34}
-    Returns None if insufficient data (< 15 picks).
+    Returns None if insufficient data (< BOOTSTRAP_MIN_N picks).
     """
     if not _sb_available():
         return None
     rows = _sb_fetch_table("stat_calibration",
         f"select=*&sport=eq.{sport}&stat_type=eq.{urllib.parse.quote(stat_type)}")
-    if not rows or rows[0].get("n_picks", 0) < 15:
+    if not rows or rows[0].get("n_picks", 0) < BOOTSTRAP_MIN_N:
         return None
     r = rows[0]
     return {
@@ -641,8 +654,15 @@ def calibration_report(min_picks: int = 5):
     print(f"\n{'='*60}\n")
 
 
-def get_calibration_adjustments(min_n: int = 15) -> dict[str, dict]:
-    """Per-bucket calibration so score_pick() can recalibrate confidence live."""
+def get_calibration_adjustments(min_n: int = None) -> dict[str, dict]:
+    """
+    Per-bucket calibration so score_pick() can recalibrate confidence live.
+
+    Uses BOOTSTRAP_MIN_N (5) in the first week so the model starts learning
+    immediately rather than waiting for 15+ resolved picks per bucket.
+    """
+    if min_n is None:
+        min_n = BOOTSTRAP_MIN_N
     entries = _load_resolved()
     if not entries:
         return {}
@@ -651,7 +671,7 @@ def get_calibration_adjustments(min_n: int = 15) -> dict[str, dict]:
         bucket = [e for e in entries if lo <= (e.get("conf_pct") or 0) < hi]
         if len(bucket) < min_n:
             continue
-        hits = sum(1 for e in bucket if e.get("hit"))
+        hits      = sum(1 for e in bucket if e.get("hit"))
         hist_rate = hits / len(bucket)
         result[f"{lo}-{hi}"] = {
             "hist_rate": round(hist_rate, 4),
@@ -782,7 +802,7 @@ if __name__ == "__main__":
     elif cmd == "report":
         calibration_report()
     elif cmd == "calibration":
-        adj = get_calibration_adjustments(min_n=10)
+        adj = get_calibration_adjustments()
         if adj:
             for bucket, d in adj.items():
                 delta_str = f"+{d['delta']:.1%}" if d['delta'] > 0 else f"{d['delta']:.1%}"
