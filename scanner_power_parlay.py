@@ -1449,9 +1449,32 @@ def score_pick(stats: dict, pick: dict) -> dict:
             nonzero_mean = stats.get("nonzero_mean")
             nonzero_std  = stats.get("nonzero_std")
 
-            if (p_zero_base > 0 and nonzero_mean is not None
+            # ── Binary threshold shortcut ────────────────────────────────────
+            # For OVER/UNDER X.5 lines where the stat is a low-count integer
+            # (Singles, Hits, HR, etc.), the question is simply "does he get
+            # at least 1?" — a binary event.  The Gaussian model, especially
+            # when using the median as center, badly overstates probability
+            # when nonzero_std ≈ 0 (player always gets exactly 1 when he hits).
+            #
+            # Example: Crews Singles OVER 0.5 — median=1.0, σ=0.49 → 84%.
+            #   But history says 8/12 = 67%.  The median reflects the typical
+            #   non-zero game, not the threshold probability.
+            #
+            # Fix: when the line is half-integer (X.5) AND nonzero_std < 0.3
+            # (near-zero variance in non-zero games), use hit_rate directly as
+            # p_over/p_under.  That IS the empirical P(stat ≥ 1).
+            _is_half_line = abs(line - round(line) - 0.5) < 0.01   # e.g. 0.5, 1.5, 2.5
+            _nonzero_std_low = (nonzero_std or 1.0) < 0.3
+
+            if _is_half_line and _nonzero_std_low and stats.get("hit_rate") is not None:
+                # Use empirical hit rate — it IS P(over X.5) for half-integer lines
+                _hr = float(stats["hit_rate"])
+                p_over  = round(max(0.01, min(0.99, _hr)), 3)
+                p_under = round(max(0.01, min(0.99, 1.0 - _hr)), 3)
+
+            elif (p_zero_base > 0 and nonzero_mean is not None
                     and nonzero_std and nonzero_std > 0.3):
-                # Adjust P(zero game) for pitcher quality
+                # Zero-inflated model for stats with real spread in non-zero games
                 p_zero_adj = p_zero_base
                 _ps = stats.get("pitcher_skill_score")
                 if _ps is not None:
@@ -1468,7 +1491,6 @@ def score_pick(stats: dict, pick: dict) -> dict:
                 _p_ov_nz  = max(0.005, min(0.995, 1.0 - _cdf_cond))
                 _p_un_nz  = max(0.005, min(0.995, _cdf_cond))
 
-                # Mixture: zero component + conditional non-zero component
                 p_over_raw  = p_nonzero * _p_ov_nz
                 p_under_raw = p_zero_adj + p_nonzero * _p_un_nz
                 _total = p_over_raw + p_under_raw
@@ -1477,16 +1499,13 @@ def score_pick(stats: dict, pick: dict) -> dict:
                     p_under = round(max(0.01, min(0.99, p_under_raw / _total)), 3)
 
             elif _std and _std > 0.3:
-                # Fallback: Gaussian when zero-inflated components unavailable
+                # Gaussian fallback for continuous-ish stats (HFS, Total Bases, etc.)
                 _z    = (line - proj_stat_val) / _std
                 _cdf  = 0.5 * (1 + _math.erf(_z / _math.sqrt(2)))
                 p_over  = round(max(0.01, min(0.99, 1.0 - _cdf)), 3)
                 p_under = round(max(0.01, min(0.99, _cdf)), 3)
 
-            # Blend into confidence at 35% — less than WNBA's 45% because
-            # effective_avg (the projection center) is a career average, not a
-            # true per-game model. The zero-inflated shape is more accurate than
-            # Gaussian, but the center is still a rough estimate.
+            # Blend into confidence at 35%
             if p_over is not None and p_under is not None:
                 _mlb_dir = stats.get("direction", "OVER")
                 _p_model = p_over if _mlb_dir == "OVER" else p_under
