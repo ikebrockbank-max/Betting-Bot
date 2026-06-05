@@ -1,12 +1,14 @@
 """
-notify.py — unified notification sender (email + push notification).
+notify.py — unified notification sender (email + push + Discord webhooks).
 
 Reads credentials from environment variables (set in .env or GitHub secrets):
 
-  GMAIL_USER         — your Gmail address
-  GMAIL_APP_PASSWORD — Gmail app password (not your regular password)
-  NOTIFY_EMAIL       — destination email address for alerts
-  NTFY_TOPIC         — ntfy.sh topic name for push notifications (free, no account needed)
+  GMAIL_USER              — your Gmail address
+  GMAIL_APP_PASSWORD      — Gmail app password (not your regular password)
+  NOTIFY_EMAIL            — destination email address for alerts
+  NTFY_TOPIC              — ntfy.sh topic name for push notifications (free, no account needed)
+  DISCORD_WEBHOOK_PREMIUM — Discord webhook URL for paid #premium-alerts channel (real-time)
+  DISCORD_WEBHOOK_FREE    — Discord webhook URL for free #free-picks channel (delayed)
 """
 
 import os
@@ -18,10 +20,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-NOTIFY_EMAIL     = os.getenv("NOTIFY_EMAIL", "")
-GMAIL_USER         = os.getenv("GMAIL_USER", "")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
-NTFY_TOPIC         = os.getenv("NTFY_TOPIC", "")
+NOTIFY_EMAIL            = os.getenv("NOTIFY_EMAIL", "")
+GMAIL_USER              = os.getenv("GMAIL_USER", "")
+GMAIL_APP_PASSWORD      = os.getenv("GMAIL_APP_PASSWORD", "")
+NTFY_TOPIC              = os.getenv("NTFY_TOPIC", "")
+DISCORD_WEBHOOK_PREMIUM = os.getenv("DISCORD_WEBHOOK_PREMIUM", "")
+DISCORD_WEBHOOK_FREE    = os.getenv("DISCORD_WEBHOOK_FREE", "")
 
 
 def _send_via_gmail(to: str, subject: str, html_body: str, plain_body: str = "") -> bool:
@@ -110,6 +114,82 @@ def send_push(message: str, title: str = "PP Bot Alert") -> bool:
         return True
     except Exception as e:
         print(f"[notify] Push notification failed: {e}")
+        return False
+
+
+def send_discord(
+    title: str,
+    picks: list,          # list of dicts: {player, direction, line, stat_type, prob, sport}
+    sport: str = "",
+    tier: str = "premium", # "premium" = real-time paid channel, "free" = delayed free channel
+    color: int = None,
+) -> bool:
+    """Post a picks embed to a Discord webhook channel.
+
+    tier="premium"  → posts to DISCORD_WEBHOOK_PREMIUM (real-time, for paid subscribers)
+    tier="free"     → posts to DISCORD_WEBHOOK_FREE    (delayed ~60 min, public/free channel)
+
+    Discord embed colors (decimal): green=3066993, gold=15844367, red=15158332, blue=3447003
+    """
+    webhook_url = DISCORD_WEBHOOK_PREMIUM if tier == "premium" else DISCORD_WEBHOOK_FREE
+    if not webhook_url:
+        return False
+
+    # Choose color by sport if not specified
+    if color is None:
+        color = {"MLB": 15844367, "NBA": 3447003, "WNBA": 15105570}.get(sport, 3066993)
+
+    # Sport emoji
+    emoji = {"MLB": "⚾", "NBA": "🏀", "WNBA": "🏀"}.get(sport, "🎯")
+
+    # Build pick lines
+    fields = []
+    for p in picks:
+        conf = int(p.get("prob", 0) * 100)
+        bar = "🟢" if conf >= 75 else "🟡"
+        direction = p.get("direction", "").upper()
+        arrow = "📈" if direction == "OVER" else "📉"
+        fields.append({
+            "name": f"{arrow} {p['player']} {direction} {p['line']} {p['stat_type']}",
+            "value": f"{bar} **{conf}% confidence** | {p.get('sport', sport)}",
+            "inline": False,
+        })
+
+    # Footer differs by tier
+    if tier == "premium":
+        footer = "⚡ Real-time alert — premium members only"
+    else:
+        footer = "🔓 Free pick (60-min delay) · Upgrade for real-time alerts"
+
+    payload = {
+        "embeds": [{
+            "title": f"{emoji} {title}",
+            "color": color,
+            "fields": fields[:25],  # Discord max 25 fields
+            "footer": {"text": footer},
+        }]
+    }
+
+    try:
+        resp = requests.post(webhook_url, json=payload, timeout=10)
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[notify] Discord webhook ({tier}) failed: {e}")
+        return False
+
+
+def send_discord_simple(message: str, title: str = "PP Bot Alert", tier: str = "premium") -> bool:
+    """Post a plain-text message to Discord (no embed formatting)."""
+    webhook_url = DISCORD_WEBHOOK_PREMIUM if tier == "premium" else DISCORD_WEBHOOK_FREE
+    if not webhook_url:
+        return False
+    try:
+        resp = requests.post(webhook_url, json={"content": f"**{title}**\n{message}"}, timeout=10)
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[notify] Discord webhook ({tier}) failed: {e}")
         return False
 
 
