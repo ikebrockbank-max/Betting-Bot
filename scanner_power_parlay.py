@@ -2098,7 +2098,7 @@ def run(sports: list[str] = None, force: bool = False):
     kelly_parlays = []
     try:
         from parlay_builder import build_diverse_parlays as _bdp, format_parlay_plan as _fpp
-        kelly_parlays = _bdp(scored, bankroll=bankroll, n_parlays=6)
+        kelly_parlays = _bdp(scored, bankroll=bankroll)
         if kelly_parlays:
             _log(f"\nKELLY PARLAY PORTFOLIO (${bankroll:.0f} bankroll):")
             for kp in kelly_parlays:

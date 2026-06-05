@@ -5,11 +5,13 @@ Takes scored picks from scanner_power_parlay and builds a slate of diverse parla
 with recommended bet sizes for a given bankroll.
 
 Design principles:
-  - Diversity: max 1 player shared between any two parlays (one miss ≠ all parlays dead)
-  - Concentration: when a pick is truly elite (p_hit ≥ 0.72), allow it in 2 parlays
-  - Kelly sizing: fractional (25%) Kelly per parlay based on p_win × payout
-  - Budget: total allocation ≤ bankroll, min $1 per parlay, max $10 per parlay
-  - Transparency: every parlay shows exact why, EV, and Kelly math
+  - Tiered mix: 2 bankers (2-pick) + 2 core (3-pick) + 2 shooters (4-5 pick)
+    → 2-picks hit ~45% of the time (steady wins + model feedback)
+    → 3-picks hit ~25-30% (solid payoff, reasonable frequency)
+    → 4-5 picks hit ~10-15% (high payout, small size, lottery-ticket role)
+  - Diversity: max 1 player shared between any two parlays
+  - Kelly sizing: fractional (25%) Kelly per parlay, sized by tier
+  - Budget: total allocation ≤ 90% of bankroll
 
 PrizePicks Power Play payouts (all-or-nothing):
   2-pick = 3x | 3-pick = 5x | 4-pick = 10x | 5-pick = 20x
@@ -18,6 +20,11 @@ Kelly formula per parlay:
   b = payout_multiple - 1  (net payout on $1)
   f* = (b × p_win - (1 - p_win)) / b
   bet = bankroll × f* × kelly_fraction
+
+Tier sizing (fraction of bankroll allocated per tier):
+  Bankers (2-pick): larger bets — hit often, steady bankroll growth
+  Core (3-pick):    medium bets — good risk/reward balance
+  Shooters (4-5 pick): small bets — high upside, capped downside
 """
 
 import itertools
@@ -28,15 +35,36 @@ from typing import Optional
 PP_PAYOUTS = {2: 3.0, 3: 5.0, 4: 10.0, 5: 20.0}
 
 KELLY_FRACTION = 0.25   # 25% fractional Kelly — conservative for high-variance parlays
-MAX_PARLAYS    = 6      # max parlays to recommend
-MIN_EV         = 0.03   # min 3% EV to include a parlay
-MIN_P_WIN      = 0.25   # min parlay win probability (prevents degenerate long shots)
 MAX_OVERLAP    = 1      # max players shared between any two parlays
 ELITE_P_HIT    = 0.72   # picks above this can appear in 2 parlays (truly elite signal)
-MIN_BET        = 1.00   # min bet size in dollars
-MAX_BET        = 10.00  # max bet size in dollars (hard cap for small bankrolls)
-MAX_RISK_PCT   = 0.90   # never allocate more than 90% of bankroll across all parlays
+MAX_RISK_PCT   = 0.80   # never allocate more than 80% of bankroll across all parlays
 POOL_LIMIT     = 25     # only consider top-N picks by p_hit when generating combos
+
+# ── Tiered slot system ─────────────────────────────────────────────────────────
+# Reserves specific slots per leg count so the portfolio always has a mix.
+# Adjust these to change the parlay style (e.g. more bankers = more conservative).
+TIER_SLOTS = {
+    2: 2,   # 2 banker parlays (2-pick, 3x) — hit ~40-50%, steady wins
+    3: 2,   # 2 core parlays  (3-pick, 5x) — hit ~25-35%, solid payoff
+    4: 1,   # 1 big parlay    (4-pick, 10x) — hit ~15-20%, high upside
+    5: 1,   # 1 shooter       (5-pick, 20x) — hit ~10-15%, lottery ticket
+}
+# Per-tier Kelly fraction — bankers get more of the bankroll, shooters get less
+TIER_KELLY = {
+    2: 0.35,   # bankers: 35% Kelly (hit often enough to justify larger size)
+    3: 0.25,   # core: standard 25% Kelly
+    4: 0.15,   # big: 15% Kelly (high variance, size down)
+    5: 0.10,   # shooter: 10% Kelly (essentially lottery, keep it small)
+}
+# Per-tier max bet (absolute cap regardless of Kelly)
+TIER_MAX_BET = {
+    2: 12.00,
+    3: 8.00,
+    4: 5.00,
+    5: 3.00,
+}
+MIN_BET = 1.00   # minimum bet in dollars
+MIN_EV  = 0.03   # min 3% EV to include any parlay
 
 
 def _get_p_hit(pick: dict) -> float:
@@ -105,29 +133,33 @@ def _combo_ev(combo: tuple, corr_factor: float) -> float:
 def build_diverse_parlays(
     scored_picks: list[dict],
     bankroll: float = 30.0,
-    n_parlays: int = MAX_PARLAYS,
+    tier_slots: dict = None,
     max_overlap: int = MAX_OVERLAP,
-    kelly_frac: float = KELLY_FRACTION,
 ) -> list[dict]:
     """
-    Build a diversified slate of parlays from scored picks.
+    Build a tiered, diversified parlay portfolio.
 
-    Algorithm:
-      1. Score all valid combinations (2–5 legs, top-POOL_LIMIT picks)
-      2. Rank by adjusted EV (post-correlation)
-      3. Greedily select parlays while enforcing diversity:
-         - No player appears in more than 2 selected parlays total
-         - No two parlays share more than max_overlap players
-         - Elite picks (p_hit ≥ ELITE_P_HIT) exempt from single-parlay limit
-      4. Size each parlay with fractional Kelly, capped at MAX_BET
-      5. Scale down proportionally if total > MAX_RISK_PCT × bankroll
+    Uses TIER_SLOTS to reserve specific slots per leg count, so the portfolio
+    always contains a mix of banker (2-pick), core (3-pick), and shooter (4-5 pick)
+    parlays — rather than filling all slots with high-EV 5-picks.
 
-    Returns list of parlay dicts with 'bet_size' and 'kelly_math' added.
+    Algorithm per tier:
+      1. Generate all combinations of that leg count (top-POOL_LIMIT picks)
+      2. Score by EV, rank descending
+      3. Select best combos that pass diversity filters:
+         - Max MAX_OVERLAP players shared between any two selected parlays
+         - A player only appears in 1 parlay (2 if elite, p_hit ≥ ELITE_P_HIT)
+      4. Size with tier-specific fractional Kelly, capped at TIER_MAX_BET
+
+    Returns list of parlay dicts ordered: bankers first, then core, then shooters.
     """
+    if tier_slots is None:
+        tier_slots = TIER_SLOTS
+
     if not scored_picks:
         return []
 
-    # Filter to picks that pass individual confidence threshold
+    # Filter eligible picks
     eligible = [
         p for p in scored_picks
         if p.get("confidence", 0) >= 0.62 and _get_p_hit(p) >= 0.55
@@ -138,20 +170,23 @@ def build_diverse_parlays(
     if len(pool) < 2:
         return []
 
-    # ── Step 1: Score all combinations ───────────────────────────────────────
-    candidates = []
-    for n_legs in range(2, min(6, len(pool) + 1)):
+    # ── Step 1: Build candidate list per tier ────────────────────────────────
+    candidates_by_tier: dict[int, list] = {n: [] for n in tier_slots}
+
+    for n_legs, slots in tier_slots.items():
+        if slots == 0 or len(pool) < n_legs:
+            continue
         payout = PP_PAYOUTS.get(n_legs, 20.0)
         for combo in itertools.combinations(pool, n_legs):
-            # Skip if any two legs are from the exact same player (different stats OK,
-            # but we'll treat as separate legs — this is fine, just keep track)
-            corr  = _correlation_factor(list(combo))
+            corr = _correlation_factor(list(combo))
             ev, p_win, p_indep, _ = _combo_ev(combo, corr)
             if ev < MIN_EV:
                 continue
-            if p_win < MIN_P_WIN:
+            # Min win probability floor per tier (2-picks need higher floor)
+            min_p = {2: 0.35, 3: 0.25, 4: 0.18, 5: 0.10}.get(n_legs, 0.10)
+            if p_win < min_p:
                 continue
-            candidates.append({
+            candidates_by_tier[n_legs].append({
                 "combo":   combo,
                 "n_legs":  n_legs,
                 "payout":  payout,
@@ -161,67 +196,62 @@ def build_diverse_parlays(
                 "ev":      round(ev, 4),
                 "ev_pct":  int(ev * 100),
                 "ev_rating": (
-                    "🔥 HIGH" if ev >= 0.20 else
-                    "✅ MED-HIGH" if ev >= 0.10 else
-                    "🟡 MED" if ev >= 0.05 else "⚠️ LOW"
+                    "🔥 HIGH"      if ev >= 0.20 else
+                    "✅ MED-HIGH"  if ev >= 0.10 else
+                    "🟡 MED"       if ev >= 0.05 else "⚠️ LOW"
                 ),
             })
+        candidates_by_tier[n_legs].sort(key=lambda x: x["ev"], reverse=True)
 
-    # Rank by EV descending
-    candidates.sort(key=lambda x: x["ev"], reverse=True)
+    # ── Step 2: Select with diversity constraint across ALL tiers ─────────────
+    selected:       list[dict]      = []
+    player_count:   dict[str, int]  = {}
+    parlay_players: list[set]       = []
 
-    # ── Step 2: Diversity-filtered selection ─────────────────────────────────
-    selected     = []
-    player_count: dict[str, int] = {}  # how many selected parlays contain this player
-    parlay_players: list[set] = []     # set of player names per selected parlay
-
-    for cand in candidates:
-        if len(selected) >= n_parlays:
-            break
-
+    def _try_add(cand: dict) -> bool:
         combo        = cand["combo"]
         this_players = {leg["player"] for leg in combo}
 
-        # Check overlap with every already-selected parlay
-        too_similar = False
-        for existing_players in parlay_players:
-            shared = this_players & existing_players
-            if len(shared) > max_overlap:
-                too_similar = True
-                break
+        for existing in parlay_players:
+            if len(this_players & existing) > max_overlap:
+                return False
 
-        if too_similar:
-            continue
-
-        # Check per-player appearance limit
-        violates_limit = False
         for player in this_players:
             p_hit = _get_p_hit(next(leg for leg in combo if leg["player"] == player))
             limit = 2 if p_hit >= ELITE_P_HIT else 1
             if player_count.get(player, 0) >= limit:
-                violates_limit = True
-                break
+                return False
 
-        if violates_limit:
-            continue
-
-        # Passed all filters — select this parlay
         selected.append(cand)
         parlay_players.append(this_players)
         for player in this_players:
             player_count[player] = player_count.get(player, 0) + 1
+        return True
 
-    # ── Step 3: Kelly sizing ──────────────────────────────────────────────────
+    # Fill tier slots in order: bankers → core → shooters
+    for n_legs in sorted(tier_slots.keys()):
+        slots = tier_slots[n_legs]
+        filled = 0
+        for cand in candidates_by_tier.get(n_legs, []):
+            if filled >= slots:
+                break
+            if _try_add(cand):
+                filled += 1
+
+    # ── Step 3: Tier-specific Kelly sizing ───────────────────────────────────
     for cand in selected:
-        raw_size = kelly_size(cand["p_win"], cand["payout"], bankroll, kelly_frac)
-        b        = cand["payout"] - 1.0
-        full_k   = (b * cand["p_win"] - (1 - cand["p_win"])) / b
-        cand["kelly_full_pct"]  = round(full_k * 100, 1)
-        cand["kelly_frac_pct"]  = round(full_k * kelly_frac * 100, 1)
-        cand["bet_raw"]         = raw_size
-        cand["win_amount_raw"]  = round(raw_size * cand["payout"], 2)
+        n   = cand["n_legs"]
+        kf  = TIER_KELLY.get(n, KELLY_FRACTION)
+        cap = TIER_MAX_BET.get(n, 10.0)
+        b   = cand["payout"] - 1.0
+        full_k = max(0.0, (b * cand["p_win"] - (1 - cand["p_win"])) / b)
+        raw    = bankroll * full_k * kf
+        cand["kelly_full_pct"] = round(full_k * 100, 1)
+        cand["kelly_frac_pct"] = round(full_k * kf  * 100, 1)
+        cand["bet_raw"]        = max(MIN_BET, min(cap, round(raw, 2)))
+        cand["win_amount_raw"] = round(cand["bet_raw"] * cand["payout"], 2)
 
-    # ── Step 4: Budget scaling ────────────────────────────────────────────────
+    # ── Step 4: Budget cap ────────────────────────────────────────────────────
     total_raw = sum(c["bet_raw"] for c in selected)
     max_total = bankroll * MAX_RISK_PCT
     if total_raw > max_total and total_raw > 0:
@@ -229,8 +259,6 @@ def build_diverse_parlays(
         for cand in selected:
             cand["bet_raw"] = max(MIN_BET, round(cand["bet_raw"] * scale, 2))
 
-    # Round bets to $0.50 increments (PrizePicks minimum is $5, but you can
-    # stack smaller amounts; round to nearest practical unit)
     for cand in selected:
         cand["bet_size"]    = _round_bet(cand["bet_raw"], bankroll)
         cand["win_amount"]  = round(cand["bet_size"] * cand["payout"], 2)
@@ -264,9 +292,9 @@ def build_diverse_parlays(
 
 
 def _round_bet(amount: float, bankroll: float) -> float:
-    """Round bet to nearest $0.50; ensure it's at least $1 and at most MAX_BET."""
+    """Round bet to nearest $0.50; ensure it's at least $1."""
     rounded = round(amount * 2) / 2  # nearest $0.50
-    return max(MIN_BET, min(MAX_BET, rounded))
+    return max(MIN_BET, rounded)
 
 
 def format_parlay_plan(
@@ -392,8 +420,7 @@ def format_parlay_ntfy(parlays: list[dict], bankroll: float) -> tuple[str, str]:
 def run_parlay_plan(
     scored_picks: list[dict],
     bankroll: float = 30.0,
-    kelly_frac: float = KELLY_FRACTION,
-    n_parlays: int = MAX_PARLAYS,
+    tier_slots: dict = None,
     verbose: bool = True,
 ) -> list[dict]:
     """
@@ -402,8 +429,7 @@ def run_parlay_plan(
     Args:
         scored_picks: output of scanner_power_parlay.score_pick()
         bankroll:     total dollars available to bet
-        kelly_frac:   fraction of full Kelly to use (default 0.25)
-        n_parlays:    max parlays to recommend
+        tier_slots:   override TIER_SLOTS dict, e.g. {2:3, 3:2, 4:1, 5:0}
         verbose:      print the plan to stdout
 
     Returns:
@@ -412,8 +438,7 @@ def run_parlay_plan(
     parlays = build_diverse_parlays(
         scored_picks,
         bankroll=bankroll,
-        n_parlays=n_parlays,
-        kelly_frac=kelly_frac,
+        tier_slots=tier_slots,
     )
 
     if verbose:
@@ -444,10 +469,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Parlay portfolio builder + Kelly sizer")
     parser.add_argument("--bankroll", type=float, default=30.0,
                         help="Available bankroll in dollars (default: 30)")
-    parser.add_argument("--kelly", type=float, default=KELLY_FRACTION,
-                        help=f"Kelly fraction (default: {KELLY_FRACTION})")
-    parser.add_argument("--parlays", type=int, default=MAX_PARLAYS,
-                        help=f"Max parlays (default: {MAX_PARLAYS})")
+    parser.add_argument("--bankers", type=int, default=TIER_SLOTS[2],
+                        help=f"Number of 2-pick banker parlays (default: {TIER_SLOTS[2]})")
+    parser.add_argument("--core",    type=int, default=TIER_SLOTS[3],
+                        help=f"Number of 3-pick core parlays (default: {TIER_SLOTS[3]})")
+    parser.add_argument("--big",     type=int, default=TIER_SLOTS[4],
+                        help=f"Number of 4-pick parlays (default: {TIER_SLOTS[4]})")
+    parser.add_argument("--shooter", type=int, default=TIER_SLOTS[5],
+                        help=f"Number of 5-pick shooter parlays (default: {TIER_SLOTS[5]})")
     parser.add_argument("--sports", nargs="+", default=["MLB", "WNBA"],
                         help="Sports to scan (default: MLB WNBA)")
     parser.add_argument("--dry-run", action="store_true",
@@ -487,11 +516,11 @@ if __name__ == "__main__":
     _log(f"Qualified picks: {len(scored)}")
     scored.sort(key=lambda x: x["confidence"], reverse=True)
 
+    custom_slots = {2: args.bankers, 3: args.core, 4: args.big, 5: args.shooter}
     parlays = run_parlay_plan(
         scored,
         bankroll=args.bankroll,
-        kelly_frac=args.kelly,
-        n_parlays=args.parlays,
+        tier_slots=custom_slots,
         verbose=True,
     )
 
