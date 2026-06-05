@@ -172,7 +172,10 @@ def fetch_standard_lines(sports: list[str] = None, days_ahead: int = 1) -> list[
                 a = proj["attributes"]
                 if a.get("odds_type") != "standard":
                     continue
-                if a.get("status") != "pre_game":
+                # Allow pre_game AND in_game lines (in_game = live / first few
+                # innings props that appear on PrizePicks' Live tab mid-game).
+                status = a.get("status", "")
+                if status not in ("pre_game", "in_progress"):
                     continue
                 if a.get("projection_type") != "Single Stat":
                     continue
@@ -180,12 +183,14 @@ def fetch_standard_lines(sports: list[str] = None, days_ahead: int = 1) -> list[
                 # ── DATE FILTER: only games starting within the window ──────────
                 start_time_str = a.get("start_time", "")
                 game_dt = _parse_start_time(start_time_str)
-                if game_dt:
+                if game_dt and status == "pre_game":
+                    # Pre-game date filter: only upcoming games in window
                     if game_dt < now_utc:
                         continue   # game already started / past
                     if game_dt > cutoff:
                         skipped_future += 1
                         continue   # too far in the future
+                # in_progress lines: no date filter — game is live now, always include
 
                 pid  = proj["relationships"].get("new_player", {}).get("data", {}).get("id", "")
                 name = players.get(pid, "?")
@@ -1859,36 +1864,59 @@ def _format_discord_embed(top_picks: list[dict], parlays: list[dict]) -> dict:
             "inline": False,
         })
 
-    # Parlay recommendations — full breakdown with per-leg P(hit) and EV
+    # Parlay recommendations — full breakdown with per-leg P(hit), EV, and Kelly sizing
     if parlays:
-        for par in parlays[:3]:
+        has_kelly = "bet_size" in parlays[0]
+        for par in parlays[:4]:
             leg_lines = []
-            # Use leg_breakdown if available (has p_hit from distribution model)
-            breakdown = par.get("leg_breakdown") or []
-            for i, l in enumerate(par["legs"]):
-                bd = breakdown[i] if i < len(breakdown) else {}
-                p_hit_pct = bd.get("p_hit_pct") or l.get("conf_pct", 0)
-                hits_l    = l["over_hits"] if l["direction"] == "OVER" else l["under_hits"]
-                n         = l.get("n_games", 0)
-                p_src_tag = " 📊" if bd.get("p_src") == "dist" else ""
+            # Prefer leg_summary (from parlay_builder) over leg_breakdown (old format)
+            leg_data = par.get("leg_summary") or par.get("leg_breakdown") or []
+            raw_legs = par.get("legs", [])
+            for i, ls in enumerate(leg_data):
+                p_hit_pct = ls.get("p_hit_pct") or ls.get("conf_pct", 0)
+                hit_rate  = ls.get("hit_rate", 0)
+                n         = ls.get("n_games", 0)
+                avg       = ls.get("avg", "?")
+                recent    = ls.get("recent_5") or ls.get("recent_values", [])[:5]
+                p_src_tag = " 📊" if ls.get("p_src") in ("model", "dist") else ""
+                # For old format, compute hit count from raw legs
+                if raw_legs and i < len(raw_legs):
+                    rl = raw_legs[i]
+                    hist_str = f"{rl.get('over_hits',0) if rl.get('direction')=='OVER' else rl.get('under_hits',0)}/{n} hist"
+                else:
+                    hist_str = f"{int(hit_rate*100)}% HR"
                 leg_lines.append(
-                    f"• {l['player']} {l['direction']} **{l['line']}** {l['stat_type']}\n"
-                    f"  P(hit): **{p_hit_pct}%**{p_src_tag} · {hits_l}/{n} historical · {l['conf_pct']}% conf"
+                    f"• {ls['player']} {ls['direction']} **{ls['line']}** {ls['stat_type']}\n"
+                    f"  P(hit): **{p_hit_pct}%**{p_src_tag} · {hist_str} · avg {avg} · L5:{recent}"
                 )
 
-            corr_note  = par.get("corr_note", "")
             ev_rating  = par.get("ev_rating", "")
-            p_win_raw  = par.get("p_win_raw", par["p_win"])
-            p_win_adj  = par["p_win"]
-            adj_str    = (f" → **{int(p_win_adj*100)}%** after correlation"
-                          if abs(p_win_raw - p_win_adj) >= 0.01 else "")
+            corr       = par.get("corr", par.get("corr_factor", 1.0))
+            p_win      = par["p_win"]
+            p_win_raw  = par.get("p_win_raw", p_win)
+            corr_note  = par.get("corr_note", "")
+
+            # Kelly sizing line
+            sizing_str = ""
+            if has_kelly:
+                bet = par.get("bet_size", 0)
+                win = par.get("win_amount", 0)
+                net = par.get("net_profit", 0)
+                k_full = par.get("kelly_full_pct", 0)
+                k_frac = par.get("kelly_frac_pct", 0)
+                sizing_str = (
+                    f"\n💵 **Bet: ${bet:.2f}** → Win: **${win:.2f}** (+${net:.2f})\n"
+                    f"   Kelly: {k_full:.1f}% full → {k_frac:.1f}% fractional"
+                )
 
             fields.append({
-                "name":  f"🎯 {par['n_legs']}-Leg Parlay — {par['payout']}x | EV: +{par['ev_pct']}% [{ev_rating}]",
+                "name":  f"🎯 {par['n_legs']}-Leg Parlay — {par['payout']:.0f}x | EV: +{par['ev_pct']}% [{ev_rating}]",
                 "value": (
                     "\n".join(leg_lines) + "\n"
-                    f"P(win): **{int(p_win_raw*100)}%**{adj_str}\n"
-                    f"**EV: +{par['ev_pct']}%** on $1 wagered | Sports: {', '.join(par['sports'])}"
+                    f"P(win): **{int(p_win*100)}%**\n"
+                    f"**EV: +{par['ev_pct']}%**"
+                    + (f" | Sports: {', '.join(par.get('sports', []))}" if par.get("sports") else "")
+                    + sizing_str
                     + (f"\n{corr_note}" if corr_note else "")
                 ),
                 "inline": False,
@@ -1913,13 +1941,28 @@ def _format_discord_embed(top_picks: list[dict], parlays: list[dict]) -> dict:
         }]
     }
 
-def _send_notifications(top_picks: list[dict], parlays: list[dict]):
+def _send_notifications(top_picks: list[dict], parlays: list[dict],
+                        bankroll: float = 30.0):
     """Send push notification + Discord embeds."""
     from notify import send_push, send_discord
 
-    top_parlay = parlays[0] if parlays else None
-    push_body  = _format_push_body(top_picks, top_parlay)
-    push_title = f"⚡ {len(top_picks)} edges | Best: {top_picks[0]['player']} {top_picks[0]['direction']} {top_picks[0]['line']} ({top_picks[0]['conf_pct']}%)" if top_picks else "Power Parlay Scan"
+    # If parlays have Kelly sizing (from parlay_builder), use compact Kelly format
+    has_kelly = parlays and "bet_size" in parlays[0]
+    if has_kelly:
+        try:
+            from parlay_builder import format_parlay_ntfy as _fpn
+            push_title, push_body = _fpn(parlays, bankroll)
+        except Exception:
+            has_kelly = False
+
+    if not has_kelly:
+        top_parlay = parlays[0] if parlays else None
+        push_body  = _format_push_body(top_picks, top_parlay)
+        push_title = (
+            f"⚡ {len(top_picks)} edges | Best: {top_picks[0]['player']} "
+            f"{top_picks[0]['direction']} {top_picks[0]['line']} ({top_picks[0]['conf_pct']}%)"
+            if top_picks else "Power Parlay Scan"
+        )
 
     send_push(push_body, title=push_title)
     _log("Push notification sent")
@@ -2050,8 +2093,31 @@ def run(sports: list[str] = None, force: bool = False):
             _log(f"  {par['n_legs']}-leg ({par['payout']}x) | p_win={int(par['p_win']*100)}% | EV=+{par['ev_pct']}% | {legs}")
     _log("=" * 60)
 
-    # 7. Send notifications
-    _send_notifications(scored[:8], parlays)
+    # 5b. Build diversified parlay portfolio with Kelly sizing
+    bankroll = float(os.getenv("BANKROLL", "30"))  # default $30; set env var to change
+    kelly_parlays = []
+    try:
+        from parlay_builder import build_diverse_parlays as _bdp, format_parlay_plan as _fpp
+        kelly_parlays = _bdp(scored, bankroll=bankroll, n_parlays=6)
+        if kelly_parlays:
+            _log(f"\nKELLY PARLAY PORTFOLIO (${bankroll:.0f} bankroll):")
+            for kp in kelly_parlays:
+                legs_str = " + ".join(
+                    f"{l['player'].split()[-1]} {l['direction']} {l['line']}"
+                    for l in kp["leg_summary"]
+                )
+                _log(f"  ${kp['bet_size']:.2f}→${kp['win_amount']:.2f} | "
+                     f"{kp['n_legs']}pk {kp['payout']:.0f}x | "
+                     f"p={int(kp['p_win']*100)}% EV+{kp['ev_pct']}% | {legs_str}")
+            plan_str = _fpp(kelly_parlays, bankroll)
+            _log(f"\n{plan_str}")
+    except Exception as _e:
+        _log(f"Kelly parlay builder failed (using standard parlays): {_e}")
+        kelly_parlays = []
+
+    # 7. Send notifications — use Kelly parlays if available, else standard parlays
+    _send_notifications(scored[:8], kelly_parlays if kelly_parlays else parlays,
+                        bankroll=bankroll)
 
     # 8. Log picks for result tracking + calibration
     # Each scored pick is saved to calibration_log.json so update_results()
