@@ -125,3 +125,6 @@ jobs:
           echo ""
           echo "--- CONFIDENCE ACCURACY ---"
           python3 calibration_tracker.py calibration
+          echo ""
+          echo "--- DEEP DIVE DIAGNOSTIC ---"
+          python3 diagnose_picks.py
