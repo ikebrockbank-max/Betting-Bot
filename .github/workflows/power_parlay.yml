@@ -117,3 +117,11 @@ jobs:
           echo "Fetching actual results and marking hit/miss in Supabase..."
           python3 calibration_tracker.py update
           echo "Done."
+
+      - name: Calibration report (hit rate by confidence bucket)
+        run: |
+          echo "--- CALIBRATION BREAKDOWN ---"
+          python3 calibration_tracker.py report
+          echo ""
+          echo "--- CONFIDENCE ACCURACY ---"
+          python3 calibration_tracker.py calibration
