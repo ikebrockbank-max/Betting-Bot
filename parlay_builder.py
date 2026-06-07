@@ -115,7 +115,7 @@ MIN_EDGE_PCT_PARLAY = 0.20  # only include picks with ≥20% edge — live data 
 # Live data (558 resolved picks): OVER hits 59%, UNDER hits 29%.
 # UNDERs fail because PrizePicks sets low lines after a player slump —
 # by the time our 10-game avg says UNDER, the line is already priced for it.
-PARLAY_OVERS_ONLY = True
+PARLAY_OVERS_ONLY = False   # keeping UNDERs in to gather more data — revisit after ~1 week
 # Max gap the model probability can exceed empirical hit rate.
 # If model says 93% but history says 60%, we cap p_hit at 75%.
 MAX_MODEL_OVERREACH = 0.15
