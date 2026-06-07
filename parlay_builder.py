@@ -622,12 +622,57 @@ def run_parlay_plan(
 
 
 # ── Goblin & Demon parlay builders ────────────────────────────────────────────
-# Goblin = PrizePicks sets line LOW → OVER is easy, lower multiplier.
-# Demon  = PrizePicks sets line HIGH → OVER is hard, massive multiplier.
-# Multipliers are approximate — the app shows the real value when you submit.
-# Keep these as SEPARATE lineups — never mix goblin/demon/standard in one parlay.
+# ── Goblin / Demon multiplier system ─────────────────────────────────────────
+# PrizePicks does NOT expose multipliers via API — they're calculated dynamically
+# in the app. The formula is payout = standard_payout[N] × product(pick_factors).
+#
+# Derived from known data points:
+#   2-pick all-goblin  = 1.4x  → goblin_factor = sqrt(1.4/3) ≈ 0.683
+#   2-pick 1D+1G       = 5.0x  → demon_factor_easy ≈ 2.44  (at ~rank 400-500)
+#   6-pick all-demon   = 1000x → demon_factor_avg  ≈ 1.73  (avg across all ranks)
+#
+# Harder demon lines (lower rank) carry higher per-pick multipliers.
+# The rank field (lower = harder = higher real multiplier) drives the adjustment.
+# ALWAYS verify the exact multiplier in the PrizePicks app before submitting.
 
-# Rough payout approximations (actual varies by pick combination in app)
+_STANDARD_PAYOUTS = {2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0, 6: 37.5}
+_GOBLIN_FACTOR    = 0.683   # per goblin pick
+# Demon per-pick factor by difficulty_rank bucket (lower rank = harder = bigger factor)
+_DEMON_FACTORS    = [
+    (150,  2.10),   # rank ≤ 150: extreme demon (5.5 TB, very high ERA lines)
+    (200,  1.95),   # rank 151-200: very hard
+    (300,  1.85),   # rank 201-300: hard
+    (400,  1.75),   # rank 301-400: moderate demon
+    (9999, 1.65),   # rank > 400: easier demon
+]
+
+def _demon_factor(rank: int) -> float:
+    """Return estimated per-pick multiplier for a demon pick of this difficulty rank."""
+    for threshold, factor in _DEMON_FACTORS:
+        if rank <= threshold:
+            return factor
+    return 1.65
+
+def _calc_payout(n_legs: int, picks: list[dict]) -> tuple[float, str]:
+    """
+    Calculate approximate payout for a goblin/demon lineup.
+    Returns (payout_multiplier, note_string).
+    """
+    base = _STANDARD_PAYOUTS.get(n_legs, 37.5)
+    multiplier = 1.0
+    for p in picks:
+        kind = p.get("projection_kind", "standard")
+        if kind == "goblin":
+            multiplier *= _GOBLIN_FACTOR
+        elif kind == "demon":
+            rank = p.get("difficulty_rank", 500)
+            multiplier *= _demon_factor(rank)
+        # standard: × 1.0
+    payout = round(base * multiplier, 1)
+    note = f"~{payout}x est. (rank-based approx — verify in app)"
+    return payout, note
+
+# Legacy flat tables kept for display fallback
 PP_GOBLIN_PAYOUTS = {2: 1.5,  3: 3.0,  4: 5.0,  5: 8.0}
 PP_DEMON_PAYOUTS  = {2: 15.0, 3: 50.0, 4: 150.0, 5: 500.0, 6: 2000.0}
 
@@ -782,12 +827,16 @@ def build_demon_parlays(demon_picks: list[dict], bankroll: float = 50.0) -> list
 def _make_parlay_dict(combo, n_legs: int, payout: float, p_win: float,
                       bankroll: float, kind: str, kelly_frac: float) -> dict:
     """Helper: pack a combo tuple into the standard parlay dict format."""
+    # Use rank-based payout estimation instead of flat approximation
+    combo_list = list(combo)
+    calc_payout, calc_note = _calc_payout(n_legs, combo_list)
+
     bet  = round(bankroll * kelly_frac, 2)
-    win  = round(bet * payout, 2)
-    ev   = round(p_win * payout - 1.0, 4)
+    win  = round(bet * calc_payout, 2)
+    ev   = round(p_win * calc_payout - 1.0, 4)
     return {
         "n_legs":      n_legs,
-        "payout":      payout,
+        "payout":      calc_payout,
         "p_win":       round(p_win, 4),
         "ev_pct":      int(ev * 100),
         "ev_rating":   ("🔥 HIGH" if ev >= 0.20 else "✅ MED" if ev >= 0.05 else "⚠️ LOW"),
@@ -797,18 +846,19 @@ def _make_parlay_dict(combo, n_legs: int, payout: float, p_win: float,
         "kelly_full_pct":  0.0,
         "kelly_frac_pct":  round(kelly_frac * 100, 1),
         "parlay_type": kind,
-        "note":        "⚠️ Multiplier approximate — check app for exact payout",
+        "note":        calc_note,
         "leg_summary": [
             {
-                "player":     leg["player"],
-                "stat_type":  leg["stat_type"],
-                "direction":  leg["direction"],
-                "line":       leg["line"],
-                "hit_rate":   leg.get("hit_rate", 0),
-                "p_hit_pct":  int(_get_p_hit(leg) * 100),
-                "confidence": leg.get("confidence", 0),
-                "avg":        leg.get("avg", "?"),
-                "n_games":    leg.get("n_games", 0),
+                "player":          leg["player"],
+                "stat_type":       leg["stat_type"],
+                "direction":       leg["direction"],
+                "line":            leg["line"],
+                "hit_rate":        leg.get("hit_rate", 0),
+                "p_hit_pct":       int(_get_p_hit(leg) * 100),
+                "confidence":      leg.get("confidence", 0),
+                "avg":             leg.get("avg", "?"),
+                "n_games":         leg.get("n_games", 0),
+                "difficulty_rank": leg.get("difficulty_rank", 999),
             }
             for leg in combo
         ],
