@@ -588,6 +588,157 @@ def run_parlay_plan(
     return parlays
 
 
+# ── Goblin & Demon parlay builders ────────────────────────────────────────────
+# Goblin = PrizePicks sets line LOW → OVER is easy, lower multiplier.
+# Demon  = PrizePicks sets line HIGH → OVER is hard, massive multiplier.
+# Multipliers are approximate — the app shows the real value when you submit.
+# Keep these as SEPARATE lineups — never mix goblin/demon/standard in one parlay.
+
+# Rough payout approximations (actual varies by pick combination in app)
+PP_GOBLIN_PAYOUTS = {2: 1.5,  3: 3.0,  4: 5.0,  5: 8.0}
+PP_DEMON_PAYOUTS  = {2: 15.0, 3: 50.0, 4: 150.0, 5: 500.0, 6: 2000.0}
+
+# Lower thresholds for goblin — lines are already easy
+MIN_CONF_GOBLIN  = 0.55
+MIN_HIT_GOBLIN   = 0.55
+MIN_EDGE_GOBLIN  = 0.03   # any positive edge (line is set low, any gap matters)
+
+# Lower thresholds for demon — lines are harder, accept more uncertainty
+MIN_CONF_DEMON   = 0.50
+MIN_HIT_DEMON    = 0.45
+MIN_EDGE_DEMON   = 0.00   # even flat edge ok — the multiplier does the work
+
+
+def build_goblin_parlays(goblin_picks: list[dict], bankroll: float = 50.0) -> list[dict]:
+    """
+    Build a goblin-only parlay from picks tagged projection_kind='goblin'.
+
+    Goblins: PrizePicks sets line BELOW player's expected output → OVER is easy.
+    PrizePicks requires you pick MORE (OVER) on all goblin projections.
+    Returns 1 parlay (2-3 legs) optimised for hit probability.
+    """
+    eligible = [
+        p for p in goblin_picks
+        if p.get("confidence", 0) >= MIN_CONF_GOBLIN
+        and p.get("hit_rate", 0)  >= MIN_HIT_GOBLIN
+        and p.get("stat_type", "") not in EXCLUDED_STAT_TYPES
+        and p.get("edge_pct", 0)  >= MIN_EDGE_GOBLIN
+        and p.get("direction") == "OVER"          # goblins require MORE
+        and p.get("projection_kind") == "goblin"
+    ]
+    eligible.sort(key=lambda x: (x.get("hit_rate", 0), _get_p_hit(x)), reverse=True)
+    pool = eligible[:15]
+
+    if len(pool) < 2:
+        return []
+
+    best = None
+    best_p = 0.0
+
+    # Prefer 3-pick; fall back to 2-pick
+    for n in [3, 2]:
+        if len(pool) < n:
+            continue
+        payout = PP_GOBLIN_PAYOUTS.get(n, 1.5)
+        for combo in itertools.combinations(pool[:10], n):
+            names = [leg["player"] for leg in combo]
+            if len(names) != len(set(names)):
+                continue
+            p_win = math.prod(_get_p_hit(leg) for leg in combo)
+            if p_win > best_p:
+                best_p = p_win
+                best = _make_parlay_dict(combo, n, payout, p_win, bankroll,
+                                         kind="goblin", kelly_frac=0.12)
+        if best:
+            break
+
+    return [best] if best else []
+
+
+def build_demon_parlays(demon_picks: list[dict], bankroll: float = 50.0) -> list[dict]:
+    """
+    Build a demon-only parlay from picks tagged projection_kind='demon'.
+
+    Demons: PrizePicks sets line ABOVE player's expected output → OVER is hard
+    but the multiplier is huge. We look for demon OVER picks where our model
+    still gives decent confidence (player trending up / exceeding the hard line).
+    Returns 1 parlay (4-6 legs) optimised for EV given the large multiplier.
+    """
+    eligible = [
+        p for p in demon_picks
+        if p.get("confidence", 0) >= MIN_CONF_DEMON
+        and p.get("hit_rate", 0)  >= MIN_HIT_DEMON
+        and p.get("stat_type", "") not in EXCLUDED_STAT_TYPES
+        and p.get("edge_pct", 0)  >= MIN_EDGE_DEMON
+        and p.get("direction") == "OVER"          # demon OVER = high-risk high-reward
+        and p.get("projection_kind") == "demon"
+    ]
+    eligible.sort(key=lambda x: (x.get("hit_rate", 0), _get_p_hit(x)), reverse=True)
+    pool = eligible[:20]
+
+    if len(pool) < 3:
+        return []
+
+    best = None
+    best_ev = -999.0
+
+    # Prefer more legs (bigger multiplier); min 3 legs
+    for n in [6, 5, 4, 3]:
+        if len(pool) < n:
+            continue
+        payout = PP_DEMON_PAYOUTS.get(n, 50.0)
+        for combo in itertools.combinations(pool[:12], n):
+            names = [leg["player"] for leg in combo]
+            if len(names) != len(set(names)):
+                continue
+            p_win = math.prod(_get_p_hit(leg) for leg in combo)
+            ev = p_win * payout - 1.0
+            if ev > best_ev:
+                best_ev = ev
+                best = _make_parlay_dict(combo, n, payout, p_win, bankroll,
+                                         kind="demon", kelly_frac=0.04)
+        if best:
+            break
+
+    return [best] if best else []
+
+
+def _make_parlay_dict(combo, n_legs: int, payout: float, p_win: float,
+                      bankroll: float, kind: str, kelly_frac: float) -> dict:
+    """Helper: pack a combo tuple into the standard parlay dict format."""
+    bet  = round(bankroll * kelly_frac, 2)
+    win  = round(bet * payout, 2)
+    ev   = round(p_win * payout - 1.0, 4)
+    return {
+        "n_legs":      n_legs,
+        "payout":      payout,
+        "p_win":       round(p_win, 4),
+        "ev_pct":      int(ev * 100),
+        "ev_rating":   ("🔥 HIGH" if ev >= 0.20 else "✅ MED" if ev >= 0.05 else "⚠️ LOW"),
+        "bet_size":    bet,
+        "win_amount":  win,
+        "net_profit":  round(win - bet, 2),
+        "kelly_full_pct":  0.0,
+        "kelly_frac_pct":  round(kelly_frac * 100, 1),
+        "parlay_type": kind,
+        "note":        "⚠️ Multiplier approximate — check app for exact payout",
+        "leg_summary": [
+            {
+                "player":     leg["player"],
+                "stat_type":  leg["stat_type"],
+                "direction":  leg["direction"],
+                "line":       leg["line"],
+                "hit_rate":   leg.get("hit_rate", 0),
+                "p_hit_pct":  int(_get_p_hit(leg) * 100),
+                "confidence": leg.get("confidence", 0),
+                "avg":        leg.get("avg", "?"),
+                "n_games":    leg.get("n_games", 0),
+            }
+            for leg in combo
+        ],
+    }
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse

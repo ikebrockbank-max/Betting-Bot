@@ -225,6 +225,79 @@ def fetch_standard_lines(sports: list[str] = None, days_ahead: int = 1) -> list[
     return lines
 
 
+def fetch_typed_lines(sports: list[str], odds_type: str) -> list[dict]:
+    """
+    Fetch PrizePicks projections for a specific odds_type: 'goblin' or 'demon'.
+    Same filtering logic as fetch_standard_lines but parameterised by type.
+    Each returned line is tagged with projection_kind = odds_type.
+    """
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now_utc   = datetime.now(timezone.utc)
+    cutoff    = now_utc + timedelta(days=1)
+
+    lines = []
+    for sport in sports:
+        lid = LEAGUE_IDS.get(sport)
+        if not lid:
+            continue
+        cached, cpath = _cache(f"pp_{odds_type}_{sport}_{today_str}", ttl=900)
+        if cached is not None:
+            lines.extend(cached)
+            continue
+
+        try:
+            url = (f"https://api.prizepicks.com/projections"
+                   f"?league_id={lid}&per_page=500&single_stat=true&state_code=AZ")
+            data = _get_json(url, {"Referer": "https://app.prizepicks.com/"})
+            players = {
+                p["id"]: p["attributes"].get("name", "?")
+                for p in data.get("included", [])
+                if p["type"] == "new_player"
+            }
+            sport_lines = []
+            for proj in data.get("data", []):
+                a = proj["attributes"]
+                if a.get("odds_type") != odds_type:
+                    continue
+                status = a.get("status", "")
+                if status not in ("pre_game", "in_progress"):
+                    continue
+                if a.get("projection_type") != "Single Stat":
+                    continue
+                start_time_str = a.get("start_time", "")
+                game_dt = _parse_start_time(start_time_str)
+                if game_dt and status == "pre_game":
+                    if game_dt < now_utc:
+                        continue
+                    if game_dt > cutoff:
+                        continue
+                pid  = proj["relationships"].get("new_player", {}).get("data", {}).get("id", "")
+                name = players.get(pid, "?")
+                if name == "?" or "+" in name:
+                    continue
+                if "(Combo)" in a.get("stat_type", "") or "1st Inning" in a.get("stat_type", ""):
+                    continue
+                sport_lines.append({
+                    "player":          name,
+                    "stat_type":       a.get("stat_type", "?"),
+                    "line":            float(a.get("line_score", 0)),
+                    "sport":           sport,
+                    "game_id":         a.get("game_id", ""),
+                    "start_time":      start_time_str,
+                    "pp_id":           proj["id"],
+                    "projection_kind": odds_type,   # ← tag it
+                })
+
+            _save(cpath, sport_lines)
+            lines.extend(sport_lines)
+            _log(f"{sport}: {len(sport_lines)} {odds_type} lines today")
+            time.sleep(0.8)
+        except Exception as e:
+            _log(f"{sport}: {odds_type} fetch failed — {e}")
+
+    return lines
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 2 — Get historical stats per sport
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1909,7 +1982,9 @@ def _format_push_body(top_picks: list[dict], top_parlay: dict | None) -> str:
 
     return "\n".join(lines)
 
-def _format_discord_embed(top_picks: list[dict], parlays: list[dict]) -> dict:
+def _format_discord_embed(top_picks: list[dict], parlays: list[dict],
+                          goblin_parlays: list[dict] = None,
+                          demon_parlays:  list[dict] = None) -> dict:
     """Build a rich Discord embed with full player names and clear reasoning."""
     fields = []
 
@@ -2023,6 +2098,40 @@ def _format_discord_embed(top_picks: list[dict], parlays: list[dict]) -> dict:
                 "inline": False,
             })
 
+    # ── Goblin parlay section ────────────────────────────────────────────────────
+    for gp in (goblin_parlays or [])[:1]:
+        leg_lines = [
+            f"🟢 {ls['player']} OVER **{ls['line']}** {ls['stat_type']} "
+            f"({int(ls['hit_rate']*100)}% HR · avg {ls['avg']})"
+            for ls in gp["leg_summary"]
+        ]
+        fields.append({
+            "name":  f"🧌 GOBLIN — {gp['n_legs']}-Leg | ~{gp['payout']}x | P(win)={int(gp['p_win']*100)}%",
+            "value": (
+                "\n".join(leg_lines) + "\n"
+                f"💵 **Bet: ${gp['bet_size']}** → ~**${gp['win_amount']}**\n"
+                f"_{gp.get('note', 'Check app for exact multiplier')}_"
+            ),
+            "inline": False,
+        })
+
+    # ── Demon parlay section ─────────────────────────────────────────────────────
+    for dp in (demon_parlays or [])[:1]:
+        leg_lines = [
+            f"🔴 {ls['player']} OVER **{ls['line']}** {ls['stat_type']} "
+            f"({int(ls['hit_rate']*100)}% HR · avg {ls['avg']})"
+            for ls in dp["leg_summary"]
+        ]
+        fields.append({
+            "name":  f"😈 DEMON — {dp['n_legs']}-Leg | ~{dp['payout']}x | P(win)={int(dp['p_win']*100)}%",
+            "value": (
+                "\n".join(leg_lines) + "\n"
+                f"💵 **Bet: ${dp['bet_size']}** → ~**${dp['win_amount']}** 🚀\n"
+                f"_{dp.get('note', 'Check app for exact multiplier')}_"
+            ),
+            "inline": False,
+        })
+
     now_et = datetime.now(timezone.utc) - timedelta(hours=4)
     ts     = now_et.strftime("%B %d, %Y at %I:%M %p ET")
 
@@ -2031,7 +2140,7 @@ def _format_discord_embed(top_picks: list[dict], parlays: list[dict]) -> dict:
             "title":       f"⚡ Power Parlay Report — {ts}",
             "description": (f"**{len(top_picks)} edges found** across "
                             f"{len({p['sport'] for p in top_picks})} sports. "
-                            f"Standard lines only. Best plays below."),
+                            f"Standard + Goblin + Demon lineups below."),
             "color":       3066993,
             "fields":      fields[:25],
             "footer":      {
@@ -2043,7 +2152,9 @@ def _format_discord_embed(top_picks: list[dict], parlays: list[dict]) -> dict:
     }
 
 def _send_notifications(top_picks: list[dict], parlays: list[dict],
-                        bankroll: float = 50.0):
+                        bankroll: float = 50.0,
+                        goblin_parlays: list[dict] = None,
+                        demon_parlays:  list[dict] = None):
     """Send push notification + Discord embeds."""
     from notify import send_push, send_discord
 
@@ -2068,7 +2179,9 @@ def _send_notifications(top_picks: list[dict], parlays: list[dict],
     send_push(push_body, title=push_title)
     _log("Push notification sent")
 
-    embed = _format_discord_embed(top_picks, parlays)
+    embed = _format_discord_embed(top_picks, parlays,
+                                  goblin_parlays=goblin_parlays or [],
+                                  demon_parlays=demon_parlays or [])
     DISCORD_WEBHOOK_PREMIUM = os.getenv("DISCORD_WEBHOOK_PREMIUM", "")
     DISCORD_WEBHOOK_FREE    = os.getenv("DISCORD_WEBHOOK_FREE", "")
 
@@ -2132,9 +2245,11 @@ def run(sports: list[str] = None, force: bool = False):
     # Pre-load context data
     _load_nba_def_ratings()
 
-    # 1. Fetch all standard lines
-    all_lines = fetch_standard_lines(sports)
-    _log(f"Total standard lines: {len(all_lines)}")
+    # 1. Fetch standard, goblin, and demon lines separately
+    all_lines    = fetch_standard_lines(sports)
+    goblin_lines = fetch_typed_lines(sports, "goblin")
+    demon_lines  = fetch_typed_lines(sports, "demon")
+    _log(f"Total standard lines: {len(all_lines)} | goblin: {len(goblin_lines)} | demon: {len(demon_lines)}")
 
     if not all_lines:
         _log("No lines found — exiting")
@@ -2222,7 +2337,7 @@ def run(sports: list[str] = None, force: bool = False):
             _log(f"  {par['n_legs']}-leg ({par['payout']}x) | p_win={int(par['p_win']*100)}% | EV=+{par['ev_pct']}% | {legs}")
     _log("=" * 60)
 
-    # 5b. Build diversified parlay portfolio with Kelly sizing
+    # 5b. Build diversified parlay portfolio with Kelly sizing (standard)
     bankroll = float(os.getenv("BANKROLL", "") or "50")  # empty string or unset → default $50
     kelly_parlays = []
     try:
@@ -2244,13 +2359,70 @@ def run(sports: list[str] = None, force: bool = False):
         _log(f"Kelly parlay builder failed (using standard parlays): {_e}")
         kelly_parlays = []
 
+    # 5c. Score goblin and demon lines, build separate parlays
+    goblin_parlays = []
+    demon_parlays  = []
+    try:
+        from parlay_builder import build_goblin_parlays as _bgp, build_demon_parlays as _bdmp
+
+        # Score goblin lines
+        scored_goblin = []
+        for pick in goblin_lines:
+            stats = get_stats_for_pick(pick)
+            if stats is None or stats.get("n_games", 0) < MIN_GAMES:
+                continue
+            s = score_pick(stats, pick)
+            s["projection_kind"] = "goblin"
+            scored_goblin.append(s)
+        _log(f"Goblin lines scored: {len(scored_goblin)}")
+
+        # Score demon lines
+        scored_demon = []
+        for pick in demon_lines:
+            stats = get_stats_for_pick(pick)
+            if stats is None or stats.get("n_games", 0) < MIN_GAMES:
+                continue
+            s = score_pick(stats, pick)
+            s["projection_kind"] = "demon"
+            scored_demon.append(s)
+        _log(f"Demon lines scored: {len(scored_demon)}")
+
+        goblin_parlays = _bgp(scored_goblin, bankroll=bankroll)
+        demon_parlays  = _bdmp(scored_demon, bankroll=bankroll)
+
+        if goblin_parlays:
+            gp = goblin_parlays[0]
+            legs_str = " + ".join(
+                f"{l['player'].split()[-1]} {l['direction']} {l['line']}"
+                for l in gp["leg_summary"]
+            )
+            _log(f"\nGOBLIN PARLAY: ${gp['bet_size']}→~${gp['win_amount']} | "
+                 f"{gp['n_legs']}pk ~{gp['payout']}x | p={int(gp['p_win']*100)}% | {legs_str}")
+        else:
+            _log("No qualifying goblin parlay found today")
+
+        if demon_parlays:
+            dp = demon_parlays[0]
+            legs_str = " + ".join(
+                f"{l['player'].split()[-1]} {l['direction']} {l['line']}"
+                for l in dp["leg_summary"]
+            )
+            _log(f"\nDEMON PARLAY: ${dp['bet_size']}→~${dp['win_amount']} | "
+                 f"{dp['n_legs']}pk ~{dp['payout']}x | p={int(dp['p_win']*100)}% | {legs_str}")
+        else:
+            _log("No qualifying demon parlay found today")
+
+    except Exception as _e:
+        _log(f"Goblin/demon parlay builder failed: {_e}")
+
     # 7. Send notifications — use Kelly parlays if available, else standard parlays.
     # When no qualifying parlays exist, _send_notifications still fires with top picks
     # so you always get a notification even on low-confidence days.
     final_notification_parlays = kelly_parlays if kelly_parlays else parlays
     if not final_notification_parlays:
         _log("No qualifying parlays today — sending picks-only notification.")
-    _send_notifications(scored[:8], final_notification_parlays, bankroll=bankroll)
+    _send_notifications(scored[:8], final_notification_parlays, bankroll=bankroll,
+                        goblin_parlays=goblin_parlays, demon_parlays=demon_parlays)
 
     # 8. Log parlays for P&L tracking
     # (Individual picks were already logged to Supabase above, before early returns)
