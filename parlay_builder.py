@@ -90,10 +90,13 @@ EXCLUDED_STAT_TYPES = {
     "Hitter Fantasy Score",
     "Hits+Runs+RBIs",
     "Hitter Strikeouts",
-    "Pitching Outs",        # 30% real hit rate — live data confirms
+    "Pitching Outs",        # 0% real hit rate in live data — always UNDER, always wrong
     "Turnovers",            # 31% real hit rate — model completely misses variance
     "3-PT Made",            # 33% real hit rate — shooter variance unpredictable
     "3-Pointers Made",      # same stat, alternate name
+    "Pitcher Strikeouts",   # 27% hit rate — bad in both directions
+    "Strikeouts",           # same stat, alternate name used in some feeds
+    "Hits Allowed",         # 27% hit rate — OVER is 0%, UNDER is 30%
     "Pts+Rebs+Asts",        # WNBA combo — MAE ±5.65, too noisy to bet
     "Pts+Rebs",             # WNBA combo — MAE ±5.56
     "Pts+Asts",             # WNBA combo — MAE ±4.96
@@ -108,6 +111,11 @@ MIN_HIT_RATE     = 0.65   # raised from 0.62 — historical hit rate is our best
 MIN_P_HIT_PARLAY = 0.68   # model probability floor
 MIN_EDGE_PCT_PARLAY = 0.20  # only include picks with ≥20% edge — live data shows
                              # 8-25% edge hits at 45%, 25%+ hits at 54-59%
+# UNDER picks banned from parlays entirely.
+# Live data (558 resolved picks): OVER hits 59%, UNDER hits 29%.
+# UNDERs fail because PrizePicks sets low lines after a player slump —
+# by the time our 10-game avg says UNDER, the line is already priced for it.
+PARLAY_OVERS_ONLY = True
 # Max gap the model probability can exceed empirical hit rate.
 # If model says 93% but history says 60%, we cap p_hit at 75%.
 MAX_MODEL_OVERREACH = 0.15
@@ -271,6 +279,7 @@ def build_diverse_parlays(
         and _get_p_hit(p) >= MIN_P_HIT_PARLAY
         and p.get("stat_type", "") not in EXCLUDED_STAT_TYPES
         and p.get("edge_pct", 0) >= MIN_EDGE_PCT_PARLAY
+        and (not PARLAY_OVERS_ONLY or p.get("direction") == "OVER")
     ]
     eligible.sort(key=_get_p_hit, reverse=True)
     pool = eligible[:POOL_LIMIT]
