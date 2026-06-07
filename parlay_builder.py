@@ -121,14 +121,17 @@ def _get_p_hit(pick: dict) -> float:
     elif direction == "UNDER" and p_under and 0.05 < p_under < 0.99:
         model_p = p_under
     else:
-        # No model probability — fall back to confidence, capped by hit rate
+        # No model probability — fall back to confidence, capped by hit rate.
+        # Use `is not None` not `> 0.10` — hit_rate=0.0 is a real value (player
+        # never hit this line) and should still cap the model, not be skipped.
         conf = pick.get("confidence", 0.62)
-        if hit_rate > 0.10:
+        if hit_rate is not None:
             return min(conf, hit_rate + MAX_MODEL_OVERREACH)
         return conf
 
-    # Cap: model can't claim more than hit_rate + MAX_MODEL_OVERREACH
-    if hit_rate > 0.10:
+    # Cap: model can't claim more than hit_rate + MAX_MODEL_OVERREACH.
+    # hit_rate=0.0 is falsy but it IS a real value — use `is not None`.
+    if hit_rate is not None:
         model_p = min(model_p, hit_rate + MAX_MODEL_OVERREACH)
 
     return model_p

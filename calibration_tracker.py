@@ -554,13 +554,16 @@ def update_results(target_date: str = None):
     pick_results_for_notif = []
     for e in pending:
         if e.get("result") is not None or e.get("actual") is not None:
+            # Use `is not None` (not `or`) so actual=0 (zero hits, zero walks, etc.)
+            # is preserved correctly — `0 or fallback` would silently drop the zero.
+            _actual = e.get("actual_value") if e.get("actual_value") is not None else e.get("actual")
             pick_results_for_notif.append({
                 "player":    e["player"],
                 "direction": e["direction"],
                 "line":      e["line"],
                 "stat_type": e["stat_type"],
                 "hit":       e.get("result") == "hit" if e.get("result") else e.get("hit"),
-                "actual":    e.get("actual_value") or e.get("actual"),
+                "actual":    _actual,
             })
 
     if resolved_count > 0:

@@ -38,10 +38,11 @@ jobs:
   power-parlay:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # Skip this job if it's the 9 AM results-update run
+    # Run on all schedules except the 9 AM results run, and on manual dispatch
+    # unless the user explicitly requested the results updater.
     if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event.schedule != '0 13 * * *'
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.update_results != 'true') ||
+      (github.event_name == 'schedule' && github.event.schedule != '0 13 * * *')
 
     steps:
       - uses: actions/checkout@v4
@@ -96,8 +97,10 @@ jobs:
   update-results:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Only runs on the 9 AM cron — resolves yesterday's picks
-    if: github.event.schedule == '0 13 * * *'
+    # Runs on the 9 AM cron, or when manually dispatched with update_results=true
+    if: >
+      github.event.schedule == '0 13 * * *' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.update_results == 'true')
 
     steps:
       - uses: actions/checkout@v4

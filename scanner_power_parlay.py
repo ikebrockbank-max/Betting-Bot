@@ -110,23 +110,19 @@ def _save_sent(data: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _parse_start_time(st: str) -> datetime | None:
-    """Parse PP start_time string to UTC datetime."""
+    """Parse PP start_time string to UTC datetime.
+    PP format: "2026-06-01T19:05:00.000-04:00"
+    Uses fromisoformat() (Python 3.11+) which handles any UTC offset correctly,
+    including positive offsets (+05:30) that the old regex mangled.
+    """
     if not st:
         return None
     try:
-        # PP format: "2026-06-01T19:05:00.000-04:00"
-        # Strip milliseconds and parse
-        st_clean = st.split(".")[0] + st[st.rfind("-", 10):]   # keep tz offset
-        if "+" in st_clean[10:] or "-" in st_clean[10:]:
-            # Has timezone offset — parse manually
-            import re
-            m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})([+-]\d{2}:\d{2})", st_clean)
-            if m:
-                dt_str, tz_str = m.groups()
-                tz_h, tz_m = int(tz_str[:3]), int(tz_str[4:])
-                offset = timedelta(hours=tz_h, minutes=(tz_m if tz_h >= 0 else -tz_m))
-                dt_naive = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S")
-                return dt_naive.replace(tzinfo=timezone.utc) - offset
+        # Strip milliseconds — fromisoformat handles the rest
+        import re as _re
+        clean = _re.sub(r"\.\d+", "", st)   # "2026-06-01T19:05:00.000-04:00" → "2026-06-01T19:05:00-04:00"
+        dt = datetime.fromisoformat(clean)
+        return dt.astimezone(timezone.utc).replace(tzinfo=timezone.utc)
     except Exception:
         pass
     return None
@@ -970,7 +966,7 @@ def score_pick(stats: dict, pick: dict) -> dict:
             pitcher_weight = max(0.40, 1.0 - min(1.0, h2h_ab / 20.0) * 0.60)
             dampened_mult  = round(1.0 + (diff_mult - 1.0) * pitcher_weight, 3)
             effective_avg  = round(effective_avg * dampened_mult, 2)
-            skill_score    = stats.get("pitcher_skill_score")
+            skill_score    = stats.get("pitcher_skill_score") or 0.0
             if h2h_ab >= 10:
                 # H2H is the primary difficulty signal — note the dampening
                 pitcher_adj_note = (
@@ -2083,17 +2079,15 @@ def _send_notifications(top_picks: list[dict], parlays: list[dict],
         except Exception as e:
             _log(f"Discord premium failed: {e}")
 
-    # Free channel: same report with 60-min delay
-    import threading
-    def _delayed():
-        time.sleep(3600)
-        if DISCORD_WEBHOOK_FREE:
-            try:
-                requests.post(DISCORD_WEBHOOK_FREE, json=embed, timeout=10)
-                _log("Discord free (delayed) sent")
-            except Exception:
-                pass
-    threading.Thread(target=_delayed, daemon=True).start()
+    # Free channel: send immediately.
+    # A 60-min daemon thread was previously used here but GH Actions kills daemon
+    # threads when the main process exits, so the message was never actually sent.
+    if DISCORD_WEBHOOK_FREE:
+        try:
+            requests.post(DISCORD_WEBHOOK_FREE, json=embed, timeout=10)
+            _log("Discord free sent")
+        except Exception as e:
+            _log(f"Discord free failed: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2228,7 +2222,7 @@ def run(sports: list[str] = None, force: bool = False):
     _log("=" * 60)
 
     # 5b. Build diversified parlay portfolio with Kelly sizing
-    bankroll = float(os.getenv("BANKROLL", "") or "30")  # empty string or unset → default $30
+    bankroll = float(os.getenv("BANKROLL", "") or "50")  # empty string or unset → default $50
     kelly_parlays = []
     try:
         from parlay_builder import build_diverse_parlays as _bdp, format_parlay_plan as _fpp
