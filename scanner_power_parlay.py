@@ -2118,7 +2118,7 @@ def _format_discord_embed(top_picks: list[dict], parlays: list[dict],
     # ── Demon parlay section ─────────────────────────────────────────────────────
     for dp in (demon_parlays or [])[:1]:
         leg_lines = [
-            f"🔴 {ls['player']} OVER **{ls['line']}** {ls['stat_type']} "
+            f"🔴 {ls['player']} {ls['direction']} **{ls['line']}** {ls['stat_type']} "
             f"({int(ls['hit_rate']*100)}% HR · avg {ls['avg']})"
             for ls in dp["leg_summary"]
         ]
@@ -2363,29 +2363,50 @@ def run(sports: list[str] = None, force: bool = False):
     goblin_parlays = []
     demon_parlays  = []
     try:
-        from parlay_builder import build_goblin_parlays as _bgp, build_demon_parlays as _bdmp
+        from parlay_builder import (build_goblin_parlays as _bgp,
+                                    build_demon_parlays as _bdmp,
+                                    EXCLUDED_STAT_TYPES as _EXCL)
+
+        # Pre-filter: drop excluded stat types before scoring (most goblin/demon
+        # lines are Fantasy Score / combo props that we'll never use — scoring them
+        # all would add 20+ minutes to the run for zero benefit).
+        # Cap at 150 per type to keep the run under ~3 minutes.
+        _GOBLIN_GOOD = [
+            p for p in goblin_lines
+            if p.get("stat_type", "") not in _EXCL
+            and "Pitches Thrown" not in p.get("stat_type", "")
+        ][:150]
+        _DEMON_GOOD = [
+            p for p in demon_lines
+            if p.get("stat_type", "") not in _EXCL
+            and "Pitches Thrown" not in p.get("stat_type", "")
+        ][:150]
+        _log(f"Goblin lines to score (after pre-filter): {len(_GOBLIN_GOOD)}")
+        _log(f"Demon  lines to score (after pre-filter): {len(_DEMON_GOOD)}")
 
         # Score goblin lines
         scored_goblin = []
-        for pick in goblin_lines:
+        for pick in _GOBLIN_GOOD:
             stats = get_stats_for_pick(pick)
             if stats is None or stats.get("n_games", 0) < MIN_GAMES:
                 continue
             s = score_pick(stats, pick)
             s["projection_kind"] = "goblin"
             scored_goblin.append(s)
+            time.sleep(0.05)
         _log(f"Goblin lines scored: {len(scored_goblin)}")
 
         # Score demon lines
         scored_demon = []
-        for pick in demon_lines:
+        for pick in _DEMON_GOOD:
             stats = get_stats_for_pick(pick)
             if stats is None or stats.get("n_games", 0) < MIN_GAMES:
                 continue
             s = score_pick(stats, pick)
             s["projection_kind"] = "demon"
             scored_demon.append(s)
-        _log(f"Demon lines scored: {len(scored_demon)}")
+            time.sleep(0.05)
+        _log(f"Demon  lines scored: {len(scored_demon)}")
 
         goblin_parlays = _bgp(scored_goblin, bankroll=bankroll)
         demon_parlays  = _bdmp(scored_demon, bankroll=bankroll)

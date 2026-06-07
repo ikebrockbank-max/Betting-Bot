@@ -664,13 +664,16 @@ def build_demon_parlays(demon_picks: list[dict], bankroll: float = 50.0) -> list
     still gives decent confidence (player trending up / exceeding the hard line).
     Returns 1 parlay (4-6 legs) optimised for EV given the large multiplier.
     """
+    # Demon lines are set ABOVE the player's average by design — the model will
+    # correctly flag most of these as UNDER (player won't reach the hard line).
+    # We allow both directions: OVER demon = rare hot-streak swing, UNDER demon =
+    # player stays under a deliberately tough line, both get the demon multiplier.
     eligible = [
         p for p in demon_picks
         if p.get("confidence", 0) >= MIN_CONF_DEMON
         and p.get("hit_rate", 0)  >= MIN_HIT_DEMON
         and p.get("stat_type", "") not in EXCLUDED_STAT_TYPES
         and p.get("edge_pct", 0)  >= MIN_EDGE_DEMON
-        and p.get("direction") == "OVER"          # demon OVER = high-risk high-reward
         and p.get("projection_kind") == "demon"
     ]
     eligible.sort(key=lambda x: (x.get("hit_rate", 0), _get_p_hit(x)), reverse=True)
