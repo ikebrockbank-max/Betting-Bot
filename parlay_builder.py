@@ -609,13 +609,45 @@ MIN_HIT_DEMON    = 0.45
 MIN_EDGE_DEMON   = 0.00   # even flat edge ok — the multiplier does the work
 
 
+def _pick_hardest_viable(picks: list[dict], min_hit: float) -> list[dict]:
+    """
+    For each (player, stat_type) group, keep only the hardest line that still
+    has hit_rate >= min_hit. 'Hardest' = lowest difficulty_rank (lower rank =
+    harder line = higher real multiplier on PrizePicks).
+
+    This ensures we always bet at the highest-multiplier line the player can
+    still realistically clear, rather than defaulting to the easiest line.
+    """
+    from collections import defaultdict
+    groups: dict = defaultdict(list)
+    for p in picks:
+        key = (p["player"], p["stat_type"])
+        groups[key].append(p)
+
+    best: list[dict] = []
+    for key, candidates in groups.items():
+        # Filter to only viable candidates first
+        viable = [c for c in candidates if c.get("hit_rate", 0) >= min_hit]
+        if not viable:
+            # Fall back to the easiest line that passes at all
+            viable = candidates
+        # Pick the hardest viable line (lowest difficulty_rank = hardest)
+        viable.sort(key=lambda x: x.get("difficulty_rank", 999))
+        best.append(viable[0])
+
+    return best
+
+
 def build_goblin_parlays(goblin_picks: list[dict], bankroll: float = 50.0) -> list[dict]:
     """
     Build a goblin-only parlay from picks tagged projection_kind='goblin'.
 
     Goblins: PrizePicks sets line BELOW player's expected output → OVER is easy.
     PrizePicks requires you pick MORE (OVER) on all goblin projections.
-    Returns 1 parlay (2-3 legs) optimised for hit probability.
+    Within the goblin tier there are multiple difficulty levels — we always
+    pick the hardest goblin line that still clears our hit-rate floor, since
+    harder goblin lines carry higher multipliers.
+    Returns 1 parlay (2-3 legs) optimised for hit probability at best multiplier.
     """
     eligible = [
         p for p in goblin_picks
@@ -626,6 +658,8 @@ def build_goblin_parlays(goblin_picks: list[dict], bankroll: float = 50.0) -> li
         and p.get("direction") == "OVER"          # goblins require MORE
         and p.get("projection_kind") == "goblin"
     ]
+    # Per player+stat: pick the hardest viable goblin line (highest real multiplier)
+    eligible = _pick_hardest_viable(eligible, min_hit=MIN_HIT_GOBLIN)
     eligible.sort(key=lambda x: (x.get("hit_rate", 0), _get_p_hit(x)), reverse=True)
     pool = eligible[:15]
 
@@ -668,6 +702,10 @@ def build_demon_parlays(demon_picks: list[dict], bankroll: float = 50.0) -> list
     # correctly flag most of these as UNDER (player won't reach the hard line).
     # We allow both directions: OVER demon = rare hot-streak swing, UNDER demon =
     # player stays under a deliberately tough line, both get the demon multiplier.
+    #
+    # For UNDER demons: we want the HARDEST viable line per player+stat (e.g.
+    # UNDER 4.5 Total Bases rather than UNDER 1.5) because harder demon lines
+    # carry higher real multipliers. _pick_hardest_viable handles this.
     eligible = [
         p for p in demon_picks
         if p.get("confidence", 0) >= MIN_CONF_DEMON
@@ -676,6 +714,8 @@ def build_demon_parlays(demon_picks: list[dict], bankroll: float = 50.0) -> list
         and p.get("edge_pct", 0)  >= MIN_EDGE_DEMON
         and p.get("projection_kind") == "demon"
     ]
+    # Per player+stat: pick the hardest viable demon line (highest real multiplier)
+    eligible = _pick_hardest_viable(eligible, min_hit=MIN_HIT_DEMON)
     eligible.sort(key=lambda x: (x.get("hit_rate", 0), _get_p_hit(x)), reverse=True)
     pool = eligible[:20]
 

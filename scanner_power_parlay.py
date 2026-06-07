@@ -285,7 +285,11 @@ def fetch_typed_lines(sports: list[str], odds_type: str) -> list[dict]:
                     "game_id":         a.get("game_id", ""),
                     "start_time":      start_time_str,
                     "pp_id":           proj["id"],
-                    "projection_kind": odds_type,   # ← tag it
+                    "projection_kind": odds_type,
+                    # rank: lower = harder line = higher real multiplier.
+                    # Used by parlay builder to pick the hardest viable line
+                    # per player/stat rather than the easiest one.
+                    "difficulty_rank": int(a.get("rank", 999)),
                 })
 
             _save(cpath, sport_lines)
