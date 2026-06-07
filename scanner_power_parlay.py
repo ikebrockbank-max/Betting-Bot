@@ -2228,7 +2228,7 @@ def run(sports: list[str] = None, force: bool = False):
     _log("=" * 60)
 
     # 5b. Build diversified parlay portfolio with Kelly sizing
-    bankroll = float(os.getenv("BANKROLL", "30"))  # default $30; set env var to change
+    bankroll = float(os.getenv("BANKROLL", "") or "30")  # empty string or unset → default $30
     kelly_parlays = []
     try:
         from parlay_builder import build_diverse_parlays as _bdp, format_parlay_plan as _fpp
@@ -2249,16 +2249,20 @@ def run(sports: list[str] = None, force: bool = False):
         _log(f"Kelly parlay builder failed (using standard parlays): {_e}")
         kelly_parlays = []
 
-    # 7. Send notifications — use Kelly parlays if available, else standard parlays
-    _send_notifications(scored[:8], kelly_parlays if kelly_parlays else parlays,
-                        bankroll=bankroll)
+    # 7. Send notifications — use Kelly parlays if available, else standard parlays.
+    # When no qualifying parlays exist, _send_notifications still fires with top picks
+    # so you always get a notification even on low-confidence days.
+    final_notification_parlays = kelly_parlays if kelly_parlays else parlays
+    if not final_notification_parlays:
+        _log("No qualifying parlays today — sending picks-only notification.")
+    _send_notifications(scored[:8], final_notification_parlays, bankroll=bankroll)
 
     # 8. Log parlays for P&L tracking
     # (Individual picks were already logged to Supabase above, before early returns)
     try:
         from calibration_tracker import log_parlay as _log_parlay
         today = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%d")
-        final_parlays = kelly_parlays if kelly_parlays else []
+        final_parlays = kelly_parlays
         for i, kp in enumerate(final_parlays, 1):
             try:
                 _log_parlay(kp, parlay_num=i, parlay_date=today)
