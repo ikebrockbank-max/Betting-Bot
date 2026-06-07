@@ -214,7 +214,7 @@ def _combo_ev(combo: tuple, corr_factor: float) -> float:
 
 def build_diverse_parlays(
     scored_picks: list[dict],
-    bankroll: float = 30.0,
+    bankroll: float = 50.0,
     tier_slots: dict = None,
     max_overlap: int = MAX_OVERLAP,
 ) -> list[dict]:
@@ -519,7 +519,7 @@ def format_parlay_ntfy(parlays: list[dict], bankroll: float) -> tuple[str, str]:
 
 def run_parlay_plan(
     scored_picks: list[dict],
-    bankroll: float = 30.0,
+    bankroll: float = 50.0,
     tier_slots: dict = None,
     verbose: bool = True,
 ) -> list[dict]:
@@ -567,8 +567,8 @@ if __name__ == "__main__":
     from pathlib import Path
 
     parser = argparse.ArgumentParser(description="Parlay portfolio builder + Kelly sizer")
-    parser.add_argument("--bankroll", type=float, default=30.0,
-                        help="Available bankroll in dollars (default: 30)")
+    parser.add_argument("--bankroll", type=float, default=50.0,
+                        help="Available bankroll in dollars (default: 50)")
     parser.add_argument("--bankers", type=int, default=TIER_SLOTS[2],
                         help=f"Number of 2-pick banker parlays (default: {TIER_SLOTS[2]})")
     parser.add_argument("--core",    type=int, default=TIER_SLOTS[3],

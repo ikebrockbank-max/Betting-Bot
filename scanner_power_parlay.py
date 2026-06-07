@@ -2042,7 +2042,7 @@ def _format_discord_embed(top_picks: list[dict], parlays: list[dict]) -> dict:
     }
 
 def _send_notifications(top_picks: list[dict], parlays: list[dict],
-                        bankroll: float = 30.0):
+                        bankroll: float = 50.0):
     """Send push notification + Discord embeds."""
     from notify import send_push, send_discord
 
