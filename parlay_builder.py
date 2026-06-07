@@ -69,13 +69,19 @@ MIN_BET = 1.00   # minimum bet in dollars
 MIN_EV  = 0.03   # min 3% EV to include any parlay
 
 # ── Stat types excluded from parlays ──────────────────────────────────────────
-# These stat types have systematic model overconfidence (measured confidence minus
-# real hit rate consistently > 10 percentage points in back-testing):
+# Measured from 558 resolved picks (2026-06-07):
 #
 #   Pitcher Fantasy Score  (+21% overconfident) — composite: K + outs + ERA quality
 #   Hitter Fantasy Score   (+10% overconfident) — composite: hits + TB + R + RBI
 #   Hits+Runs+RBIs         (+18% overconfident) — composite: 3 uncorrelated stats
 #   Hitter Strikeouts      (+15% overconfident) — too situational, model can't price well
+#   Pitching Outs          (30% real hit rate)  — confirmed terrible in live data
+#   Turnovers              (31% real hit rate)  — high variance, model completely wrong
+#   3-PT Made              (33% real hit rate)  — shooter variance unpredictable
+#   Pts+Rebs+Asts          (MAE ±5.65)         — WNBA combo, projection too noisy
+#   Pts+Rebs               (MAE ±5.56)         — WNBA combo, projection too noisy
+#   Pts+Asts               (MAE ±4.96)         — WNBA combo, projection too noisy
+#   Rebs+Asts              (MAE ±2.21)         — WNBA combo, projection too noisy
 #
 # We keep these in the initial scan / Discord report as informational,
 # but they are filtered out before any parlay is constructed.
@@ -84,12 +90,24 @@ EXCLUDED_STAT_TYPES = {
     "Hitter Fantasy Score",
     "Hits+Runs+RBIs",
     "Hitter Strikeouts",
+    "Pitching Outs",        # 30% real hit rate — live data confirms
+    "Turnovers",            # 31% real hit rate — model completely misses variance
+    "3-PT Made",            # 33% real hit rate — shooter variance unpredictable
+    "3-Pointers Made",      # same stat, alternate name
+    "Pts+Rebs+Asts",        # WNBA combo — MAE ±5.65, too noisy to bet
+    "Pts+Rebs",             # WNBA combo — MAE ±5.56
+    "Pts+Asts",             # WNBA combo — MAE ±4.96
+    "Rebs+Asts",            # WNBA combo — MAE ±2.21
 }
 
-# Quality gates — all three must pass for a pick to enter a parlay
-MIN_CONF_PARLAY  = 0.65   # composite model confidence floor (raised from 0.62)
-MIN_HIT_RATE     = 0.62   # empirical hit rate floor — model can't override real history
-MIN_P_HIT_PARLAY = 0.68   # model probability floor (raised from 0.55)
+# Quality gates — all three must pass for a pick to enter a parlay.
+# Calibration data (558 resolved picks) shows model confidence is uncorrelated
+# with hit rate — the only reliable signals are edge size and empirical hit rate.
+MIN_CONF_PARLAY  = 0.65   # composite model confidence floor
+MIN_HIT_RATE     = 0.65   # raised from 0.62 — historical hit rate is our best signal
+MIN_P_HIT_PARLAY = 0.68   # model probability floor
+MIN_EDGE_PCT_PARLAY = 0.20  # only include picks with ≥20% edge — live data shows
+                             # 8-25% edge hits at 45%, 25%+ hits at 54-59%
 # Max gap the model probability can exceed empirical hit rate.
 # If model says 93% but history says 60%, we cap p_hit at 75%.
 MAX_MODEL_OVERREACH = 0.15
@@ -252,6 +270,7 @@ def build_diverse_parlays(
         and p.get("hit_rate", 0) >= MIN_HIT_RATE
         and _get_p_hit(p) >= MIN_P_HIT_PARLAY
         and p.get("stat_type", "") not in EXCLUDED_STAT_TYPES
+        and p.get("edge_pct", 0) >= MIN_EDGE_PCT_PARLAY
     ]
     eligible.sort(key=_get_p_hit, reverse=True)
     pool = eligible[:POOL_LIMIT]

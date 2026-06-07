@@ -1609,6 +1609,7 @@ def score_pick(stats: dict, pick: dict) -> dict:
 
     result = {**pick, **stats}
     result["hit_score"]       = round(hit_score, 3)
+    result["edge_pct"]        = round(edge_pct, 4)   # raw edge fraction (e.g. 0.25 = 25%)
     result["edge_score"]      = round(edge_score, 3)
     result["trend_score"]     = round(trend_score, 3)
     result["opp_score"]       = round(opp_score, 3)
