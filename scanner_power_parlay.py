@@ -2167,7 +2167,9 @@ def _send_notifications(top_picks: list[dict], parlays: list[dict],
     if has_kelly:
         try:
             from parlay_builder import format_parlay_ntfy as _fpn
-            push_title, push_body = _fpn(parlays, bankroll)
+            push_title, push_body = _fpn(parlays, bankroll,
+                                         goblin_parlays=goblin_parlays,
+                                         demon_parlays=demon_parlays)
         except Exception:
             has_kelly = False
 

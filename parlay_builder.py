@@ -507,38 +507,71 @@ def format_parlay_plan(
     return "\n".join(lines)
 
 
-def format_parlay_ntfy(parlays: list[dict], bankroll: float) -> tuple[str, str]:
+def format_parlay_ntfy(parlays: list[dict], bankroll: float,
+                       goblin_parlays: list[dict] = None,
+                       demon_parlays:  list[dict] = None) -> tuple[str, str]:
     """
     Returns (title, body) for ntfy push notification.
     Human-readable format — designed for phone screen.
-    Plain English, no jargon. Shows stat type on every leg.
+    Shows standard parlays + goblin + demon as separate sections.
     """
-    if not parlays:
+    all_parlays = parlays or []
+    has_any = all_parlays or goblin_parlays or demon_parlays
+    if not has_any:
         return "No parlays found", "No qualifying parlays today."
 
-    total_bet = sum(p["bet_size"] for p in parlays)
-    total_win = sum(p["win_amount"] for p in parlays)
+    total_bet = sum(p["bet_size"] for p in all_parlays)
+    total_win = sum(p["win_amount"] for p in all_parlays)
 
-    title = f"🎯 {len(parlays)} parlays today — risk ${total_bet:.0f}, max win ${total_win:.0f}"
+    extras = []
+    if goblin_parlays:
+        total_bet += sum(p["bet_size"] for p in goblin_parlays)
+        total_win += sum(p["win_amount"] for p in goblin_parlays)
+        extras.append("🧌 goblin")
+    if demon_parlays:
+        total_bet += sum(p["bet_size"] for p in demon_parlays)
+        total_win += sum(p["win_amount"] for p in demon_parlays)
+        extras.append("😈 demon")
+
+    extra_str = f" + {', '.join(extras)}" if extras else ""
+    title = f"🎯 {len(all_parlays)} standard{extra_str} — risk ${total_bet:.0f}, max win ${total_win:.0f}"
 
     lines = []
-    for i, par in enumerate(parlays, 1):
-        bet     = par["bet_size"]
-        win     = par["win_amount"]
-        p_win   = int(par["p_win"] * 100)
-        n_legs  = par["n_legs"]
-        payout  = int(par["payout"])
 
-        lines.append(f"── Parlay {i}: ${bet:.0f} bet → ${win:.0f} if all {n_legs} hit ({p_win}% chance) ──")
+    # Standard parlays
+    for i, par in enumerate(all_parlays, 1):
+        bet    = par["bet_size"]
+        win    = par["win_amount"]
+        p_win  = int(par["p_win"] * 100)
+        n_legs = par["n_legs"]
+        payout = int(par["payout"])
+        lines.append(f"── Standard {i}: ${bet:.0f}→${win:.0f} | {n_legs}-pick {payout}x | {p_win}% ──")
         for leg in par["leg_summary"]:
-            direction  = leg["direction"]
-            line       = leg["line"]
-            stat       = leg["stat_type"]
-            player     = leg["player"]
-            hit_pct    = int(leg["hit_rate"] * 100)
-            avg        = leg["avg"]
-            arrow      = "↑" if direction == "OVER" else "↓"
-            lines.append(f"  {arrow} {player} — {direction} {line} {stat}  ({hit_pct}% hit rate, avg {avg})")
+            arrow = "↑" if leg["direction"] == "OVER" else "↓"
+            lines.append(f"  {arrow} {leg['player']} — OVER {leg['line']} {leg['stat_type']}  ({int(leg['hit_rate']*100)}% HR, avg {leg['avg']})")
+        lines.append("")
+
+    # Goblin parlay
+    for par in (goblin_parlays or [])[:1]:
+        bet    = par["bet_size"]
+        win    = par["win_amount"]
+        p_win  = int(par["p_win"] * 100)
+        n_legs = par["n_legs"]
+        lines.append(f"── 🧌 Goblin: ${bet:.0f}→~${win:.0f} | {n_legs}-pick ~{par['payout']}x | {p_win}% (check app for real multiplier) ──")
+        for leg in par["leg_summary"]:
+            lines.append(f"  ↑ {leg['player']} — OVER {leg['line']} {leg['stat_type']}  ({int(leg['hit_rate']*100)}% HR, avg {leg['avg']})")
+        lines.append("")
+
+    # Demon parlay
+    for par in (demon_parlays or [])[:1]:
+        bet    = par["bet_size"]
+        win    = par["win_amount"]
+        p_win  = int(par["p_win"] * 100)
+        n_legs = par["n_legs"]
+        lines.append(f"── 😈 Demon: ${bet:.0f}→~${win:.0f} | {n_legs}-pick ~{par['payout']}x | {p_win}% (check app for real multiplier) ──")
+        for leg in par["leg_summary"]:
+            arrow = "↑" if leg["direction"] == "OVER" else "↓"
+            lines.append(f"  {arrow} {leg['player']} — {leg['direction']} {leg['line']} {leg['stat_type']}  ({int(leg['hit_rate']*100)}% HR, avg {leg['avg']})")
         lines.append("")
 
     body = "\n".join(lines)
@@ -603,9 +636,11 @@ MIN_CONF_GOBLIN  = 0.55
 MIN_HIT_GOBLIN   = 0.55
 MIN_EDGE_GOBLIN  = 0.03   # any positive edge (line is set low, any gap matters)
 
-# Lower thresholds for demon — lines are harder, accept more uncertainty
+# Lower thresholds for demon — OVER on a hard line, multiplier compensates.
+# Demon lines are set above the player's average, so hit rates will be lower.
+# We need players trending up / on hot streaks to actually clear the demon line.
 MIN_CONF_DEMON   = 0.50
-MIN_HIT_DEMON    = 0.45
+MIN_HIT_DEMON    = 0.35   # lowered — demon OVER at 35-50% hit rate is viable at 500x+
 MIN_EDGE_DEMON   = 0.00   # even flat edge ok — the multiplier does the work
 
 
@@ -698,20 +733,18 @@ def build_demon_parlays(demon_picks: list[dict], bankroll: float = 50.0) -> list
     still gives decent confidence (player trending up / exceeding the hard line).
     Returns 1 parlay (4-6 legs) optimised for EV given the large multiplier.
     """
-    # Demon lines are set ABOVE the player's average by design — the model will
-    # correctly flag most of these as UNDER (player won't reach the hard line).
-    # We allow both directions: OVER demon = rare hot-streak swing, UNDER demon =
-    # player stays under a deliberately tough line, both get the demon multiplier.
-    #
-    # For UNDER demons: we want the HARDEST viable line per player+stat (e.g.
-    # UNDER 4.5 Total Bases rather than UNDER 1.5) because harder demon lines
-    # carry higher real multipliers. _pick_hardest_viable handles this.
+    # Demon = PrizePicks requires you pick MORE (OVER), same as goblins.
+    # Demon lines are set ABOVE the player's average — these are hard-line OVER bets.
+    # We use lower thresholds than standard because demon multipliers compensate
+    # for the lower individual hit rate. Look for players trending up or on hot
+    # streaks whose recent form can actually clear the hard demon line.
     eligible = [
         p for p in demon_picks
         if p.get("confidence", 0) >= MIN_CONF_DEMON
         and p.get("hit_rate", 0)  >= MIN_HIT_DEMON
         and p.get("stat_type", "") not in EXCLUDED_STAT_TYPES
         and p.get("edge_pct", 0)  >= MIN_EDGE_DEMON
+        and p.get("direction") == "OVER"           # demons require MORE
         and p.get("projection_kind") == "demon"
     ]
     # Per player+stat: pick the hardest viable demon line (highest real multiplier)
