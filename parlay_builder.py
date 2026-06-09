@@ -69,47 +69,49 @@ MIN_BET = 1.00   # minimum bet in dollars
 MIN_EV  = 0.03   # min 3% EV to include any parlay
 
 # ── Stat types excluded from parlays ──────────────────────────────────────────
-# Measured from 558 resolved picks (2026-06-07):
+# Measured from 902 resolved picks (2026-06-08). Hit rate of qualified picks shown.
 #
-#   Pitcher Fantasy Score  (+21% overconfident) — composite: K + outs + ERA quality
-#   Hitter Fantasy Score   (+10% overconfident) — composite: hits + TB + R + RBI
-#   Hits+Runs+RBIs         (+18% overconfident) — composite: 3 uncorrelated stats
-#   Hitter Strikeouts      (+15% overconfident) — too situational, model can't price well
-#   Pitching Outs          (30% real hit rate)  — confirmed terrible in live data
-#   Turnovers              (31% real hit rate)  — high variance, model completely wrong
-#   3-PT Made              (33% real hit rate)  — shooter variance unpredictable
-#   Pts+Rebs+Asts          (MAE ±5.65)         — WNBA combo, projection too noisy
-#   Pts+Rebs               (MAE ±5.56)         — WNBA combo, projection too noisy
-#   Pts+Asts               (MAE ±4.96)         — WNBA combo, projection too noisy
-#   Rebs+Asts              (MAE ±2.21)         — WNBA combo, projection too noisy
+#   Pitching Outs          0%  — confirmed disaster, always wrong
+#   Pitcher Strikeouts     25% — model has no real edge on K variance
+#   Hits Allowed           33% — OVER is 0%, UNDER is 30%
+#   3-PT Made / 3-PT Made  33% — shooter variance completely unpredictable
+#   Turnovers              29% — high variance, model completely wrong
+#   Hitter Strikeouts      44% — below 50%, net negative EV
+#   Hits+Runs+RBIs         ~45%— composite, 3 uncorrelated stats compound error
 #
-# We keep these in the initial scan / Discord report as informational,
-# but they are filtered out before any parlay is constructed.
+# Fantasy Score types: now tracked properly (PrizePicks formula implemented
+# in calibration_tracker). Keep in scan, filter from parlays until 30+ picks resolve.
+#
+# WNBA combos (Pts+Rebs+Asts etc): small sample looks good (70-83%) but n<15.
+# Keep excluded from parlays until 30+ resolved picks confirm the signal.
+#
 EXCLUDED_STAT_TYPES = {
-    "Pitcher Fantasy Score",
-    "Hitter Fantasy Score",
-    "Hits+Runs+RBIs",
-    "Hitter Strikeouts",
-    "Pitching Outs",        # 0% real hit rate in live data — always UNDER, always wrong
-    "Turnovers",            # 31% real hit rate — model completely misses variance
-    "3-PT Made",            # 33% real hit rate — shooter variance unpredictable
+    # MLB pitcher — confirmed terrible
+    "Pitcher Strikeouts",   # 25% actual hit rate (16 picks)
+    "Strikeouts",           # same stat, alternate API name
+    "Pitching Outs",        # 0% actual hit rate (6 picks)
+    "Hits Allowed",         # 33% actual hit rate (15 picks)
+    # MLB batter — confirmed bad or unresolvable
+    "Hitter Strikeouts",    # 44% actual hit rate (32 picks) — below breakeven
+    "Hits+Runs+RBIs",       # composite: 3 uncorrelated stats inflate false confidence
+    # NBA/WNBA — confirmed bad
+    "Turnovers",            # 29% actual hit rate (24 picks)
+    "3-PT Made",            # 33% actual hit rate (6 picks)
     "3-Pointers Made",      # same stat, alternate name
-    "Pitcher Strikeouts",   # 27% hit rate — bad in both directions
-    "Strikeouts",           # same stat, alternate name used in some feeds
-    "Hits Allowed",         # 27% hit rate — OVER is 0%, UNDER is 30%
-    "Pts+Rebs+Asts",        # WNBA combo — MAE ±5.65, too noisy to bet
-    "Pts+Rebs",             # WNBA combo — MAE ±5.56
-    "Pts+Asts",             # WNBA combo — MAE ±4.96
-    "Rebs+Asts",            # WNBA combo — MAE ±2.21
+    # WNBA combos — small sample, keep excluded until n≥30
+    "Pts+Rebs+Asts",        # 70% (10 picks) — promising but too few to trust
+    "Pts+Rebs",             # 53% (60 picks) — marginal, keep excluded for now
+    "Pts+Asts",             # insufficient data
+    "Rebs+Asts",            # 83% (6 picks) — tiny sample, wait for confirmation
 }
 
 # Quality gates — all three must pass for a pick to enter a parlay.
 # Calibration data (558 resolved picks) shows model confidence is uncorrelated
 # with hit rate — the only reliable signals are edge size and empirical hit rate.
-MIN_CONF_PARLAY  = 0.68   # raised from 0.65 — 65% bucket only hitting 49.5% real (2026-06-08)
-MIN_HIT_RATE     = 0.67   # raised from 0.65 — only use picks with strong historical backing
-MIN_P_HIT_PARLAY = 0.70   # raised from 0.68 — model is overconfident by ~15pp
-MIN_EDGE_PCT_PARLAY = 0.22  # raised slightly — 25%+ edge zone hits at 54-59%
+MIN_CONF_PARLAY  = 0.70   # raised from 0.65 — only 70-80% bucket shows real signal (64% actual)
+MIN_HIT_RATE     = 0.67   # raised from 0.62 — historical hit rate is our most reliable signal
+MIN_P_HIT_PARLAY = 0.70   # raised from 0.68 — model probability must agree with confidence
+MIN_EDGE_PCT_PARLAY = 0.25  # raised from 0.20 — 15-20% edge zone hits at 30% (worse than random)
 # UNDER picks banned from parlays entirely.
 # Live data (558 resolved picks): OVER hits 59%, UNDER hits 29%.
 # UNDERs fail because PrizePicks sets low lines after a player slump —

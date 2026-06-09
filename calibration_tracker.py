@@ -799,26 +799,96 @@ def _fetch_actual_mlb(player: str, stat_type: str, target_date: str):
         pid = find_player_id(player)
         if not pid:
             return None
-        group = "pitching" if stat_type in PITCHER_STAT_TYPES else "hitting"
-        url   = (f"https://statsapi.mlb.com/api/v1/people/{pid}/stats"
-                 f"?stats=gameLog&group={group}&season=2026")
-        data  = _j.loads(_ur.urlopen(url, timeout=10).read())
+
+        # Fetch both hitting and pitching when needed for composite stats
+        _PITCHER_STATS = {"Strikeouts", "Pitcher Strikeouts", "Hits Allowed",
+                          "Earned Runs Allowed", "Walks Allowed", "Pitching Outs",
+                          "Pitcher Fantasy Score", "Pitches Thrown"}
+        group = "pitching" if stat_type in _PITCHER_STATS else "hitting"
+
+        url  = (f"https://statsapi.mlb.com/api/v1/people/{pid}/stats"
+                f"?stats=gameLog&group={group}&season=2026")
+        data = _j.loads(_ur.urlopen(url, timeout=10).read())
+
         for s in data.get("stats", [{}])[0].get("splits", []):
             if s.get("date") == target_date:
                 st = s["stat"]
-                if stat_type in ("Strikeouts","Pitcher Strikeouts"): return st.get("strikeOuts")
-                if stat_type == "Hits Allowed":          return st.get("hits")
-                if stat_type == "Earned Runs Allowed":   return st.get("earnedRuns")
-                if stat_type == "Walks Allowed":         return st.get("baseOnBalls")
-                if stat_type == "Pitching Outs":         return st.get("outs")
-                if stat_type == "Hits":                  return st.get("hits")
-                if stat_type == "Singles":               return st.get("singles")
-                if stat_type == "Home Runs":             return st.get("homeRuns")
-                if stat_type == "Walks":                 return st.get("baseOnBalls")
-                if stat_type == "Runs":                  return st.get("runs")
-                if stat_type == "RBI":                   return st.get("rbi")
-                if stat_type == "Total Bases":           return st.get("totalBases")
-                if stat_type == "Hitter Strikeouts":     return st.get("strikeOuts")
+
+                # ── Pitcher stats ──────────────────────────────────────────────
+                if stat_type in ("Strikeouts", "Pitcher Strikeouts"):
+                    return st.get("strikeOuts")
+                if stat_type == "Hits Allowed":
+                    return st.get("hits")
+                if stat_type == "Earned Runs Allowed":
+                    return st.get("earnedRuns")
+                if stat_type == "Walks Allowed":
+                    return st.get("baseOnBalls")
+                if stat_type == "Pitching Outs":
+                    return st.get("outs")
+                if stat_type == "Pitches Thrown":
+                    return st.get("numberOfPitches")
+
+                # ── Pitcher Fantasy Score (PrizePicks official formula) ────────
+                # Outs×0.75 + K×2 + W×4 - ER×2 - H×0.6 - BB×0.6 - HBP×0.6
+                if stat_type == "Pitcher Fantasy Score":
+                    outs = st.get("outs") or 0
+                    ks   = st.get("strikeOuts") or 0
+                    wins = st.get("wins") or 0
+                    er   = st.get("earnedRuns") or 0
+                    h    = st.get("hits") or 0
+                    bb   = st.get("baseOnBalls") or 0
+                    hbp  = st.get("hitBatsmen") or 0
+                    score = (outs * 0.75 + ks * 2.0 + wins * 4.0
+                             - er * 2.0 - h * 0.6 - bb * 0.6 - hbp * 0.6)
+                    return round(score, 2)
+
+                # ── Hitter stats ───────────────────────────────────────────────
+                if stat_type == "Hits":
+                    return st.get("hits")
+                if stat_type == "Home Runs":
+                    return st.get("homeRuns")
+                if stat_type == "Walks":
+                    return st.get("baseOnBalls")
+                if stat_type == "Runs":
+                    return st.get("runs")
+                if stat_type == "RBI":
+                    return st.get("rbi")
+                if stat_type == "Total Bases":
+                    return st.get("totalBases")
+                if stat_type == "Hitter Strikeouts":
+                    return st.get("strikeOuts")
+                if stat_type == "Stolen Bases":
+                    return st.get("stolenBases")
+
+                # Singles = Hits - Doubles - Triples - HRs  (API has no singles field)
+                if stat_type == "Singles":
+                    h  = st.get("hits") or 0
+                    d  = st.get("doubles") or 0
+                    t  = st.get("triples") or 0
+                    hr = st.get("homeRuns") or 0
+                    return max(0, h - d - t - hr)
+
+                # ── Hitter Fantasy Score (PrizePicks official formula) ─────────
+                # 1B×3 + 2B×6 + 3B×9 + HR×12 + RBI×3.5 + R×3.5
+                # + BB×3 + HBP×3 + SB×6 - K×1
+                if stat_type == "Hitter Fantasy Score":
+                    h   = st.get("hits") or 0
+                    d   = st.get("doubles") or 0
+                    t   = st.get("triples") or 0
+                    hr  = st.get("homeRuns") or 0
+                    singles = max(0, h - d - t - hr)
+                    rbi = st.get("rbi") or 0
+                    r   = st.get("runs") or 0
+                    bb  = st.get("baseOnBalls") or 0
+                    hbp = st.get("hitByPitch") or 0
+                    sb  = st.get("stolenBases") or 0
+                    ks  = st.get("strikeOuts") or 0
+                    score = (singles * 3.0 + d * 6.0 + t * 9.0 + hr * 12.0
+                             + rbi * 3.5 + r * 3.5
+                             + bb * 3.0 + hbp * 3.0 + sb * 6.0
+                             - ks * 1.0)
+                    return round(score, 2)
+
         return None
     except Exception:
         return None
