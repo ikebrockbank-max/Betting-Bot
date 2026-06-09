@@ -76,12 +76,18 @@ def _sb_request(method: str, path: str, body=None, params: str = "") -> list | d
         print(f"[calibration] Supabase {method} {path}: {e}")
         return None
 
-def _sb_upsert_table(table: str, row: dict) -> bool:
-    """Generic upsert to any table."""
+def _sb_upsert_table(table: str, row: dict, on_conflict: str = "") -> bool:
+    """Generic upsert to any table.
+
+    on_conflict: comma-separated column(s) that form the unique constraint,
+    e.g. "sport,stat_type". Required for Supabase to perform merge-on-conflict
+    rather than raising a 409.
+    """
+    qs = f"?on_conflict={on_conflict}" if on_conflict else ""
     req = urllib.request.Request(
-        f"{_SB_URL}/rest/v1/{table}",
+        f"{_SB_URL}/rest/v1/{table}{qs}",
         data=json.dumps(row).encode(),
-        headers={**_sb_headers(), "Prefer": "resolution=merge-duplicates"},
+        headers={**_sb_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
         method="POST",
     )
     try:
@@ -112,11 +118,16 @@ def _sb_fetch_table(table: str, params: str = "select=*") -> list[dict]:
     return result if isinstance(result, list) else []
 
 def _sb_upsert(row: dict) -> bool:
-    """Insert or update a pick_log row."""
+    """Insert or update a pick_log row.
+
+    Supabase requires on_conflict to be specified in the URL for
+    resolution=merge-duplicates to work (otherwise returns 409).
+    Unique constraint on pick_log is (pick_date, player, stat_type).
+    """
     req = urllib.request.Request(
-        f"{_SB_URL}/rest/v1/{_TABLE}",
+        f"{_SB_URL}/rest/v1/{_TABLE}?on_conflict=pick_date,player,stat_type",
         data=json.dumps(row).encode(),
-        headers={**_sb_headers(), "Prefer": "resolution=merge-duplicates"},
+        headers={**_sb_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
         method="POST",
     )
     try:
@@ -251,7 +262,7 @@ def log_parlay(parlay: dict, parlay_num: int, parlay_date: str = None):
     }
 
     if _sb_available():
-        _sb_upsert_table("parlay_log", row)
+        _sb_upsert_table("parlay_log", row, on_conflict="parlay_date,parlay_num")
 
 
 def resolve_parlays(target_date: str) -> list[dict]:
@@ -362,7 +373,7 @@ def update_stat_calibration():
             "real_hit_rate":  real_rate,
             "avg_confidence": avg_conf,
             "overconfidence": overconf,
-        })
+        }, on_conflict="sport,stat_type")
 
 
 def get_stat_calibration(sport: str, stat_type: str) -> dict | None:
@@ -615,7 +626,8 @@ def calibration_report(min_picks: int = 5):
     print(f"  {'Bucket':<10} {'Model':<8} {'Real':<8} {'Delta':<10} {'N picks':<10} {'N bet'}")
     print(f"  {'-'*58}")
     for lo, hi in [(40,50),(50,60),(60,65),(65,70),(70,75),(75,80),(80,85),(85,100)]:
-        bucket = [e for e in entries if lo <= (e.get("conf_pct") or 0) < hi]
+        # conf_pct may come back from Supabase as string or float — coerce to int
+        bucket = [e for e in entries if lo <= int(e.get("conf_pct") or 0) < hi]
         if len(bucket) >= min_picks:
             b_hits  = sum(1 for e in bucket if e.get("hit"))
             ideal   = (lo + hi) / 2 / 100
@@ -686,7 +698,7 @@ def get_calibration_adjustments(min_n: int = None) -> dict[str, dict]:
         return {}
     result = {}
     for lo, hi in [(60,70),(70,75),(75,80),(80,85),(85,90),(90,100)]:
-        bucket = [e for e in entries if lo <= (e.get("conf_pct") or 0) < hi]
+        bucket = [e for e in entries if lo <= int(e.get("conf_pct") or 0) < hi]
         if len(bucket) < min_n:
             continue
         hits      = sum(1 for e in bucket if e.get("hit"))

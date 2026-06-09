@@ -77,7 +77,7 @@ jobs:
             exit 0
           fi
 
-          CMD="python3 scanner_power_parlay.py --sports MLB WNBA"
+          CMD="python3 scanner_power_parlay.py --sports MLB WNBA NBA"
           if [ -n "$SPORTS" ]; then
             CMD="python3 scanner_power_parlay.py --sports $SPORTS"
           fi

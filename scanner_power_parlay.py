@@ -38,7 +38,7 @@ LEAGUE_IDS = {"NBA": 7, "MLB": 2, "WNBA": 3, "TENNIS": 5, "SOCCER": 82, "NHL": 8
 PP_PAYOUTS   = {2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0}
 PP_BREAKEVEN = {n: 1 / p for n, p in PP_PAYOUTS.items()}  # fraction parlay must hit
 
-MIN_CONF      = 0.65   # minimum individual confidence to include
+MIN_CONF      = 0.68   # raised from 0.65 — 65% bucket hitting 49.5% real (2026-06-08)
 MIN_EDGE_PCT  = 0.08   # minimum 8% gap between player avg and PP line
 MIN_GAMES       = 6    # minimum game history required (MLB needs 6+ starts for reliability)
 MIN_GAMES_NBA   = 8    # NBA needs more games for stability

@@ -106,16 +106,15 @@ EXCLUDED_STAT_TYPES = {
 # Quality gates — all three must pass for a pick to enter a parlay.
 # Calibration data (558 resolved picks) shows model confidence is uncorrelated
 # with hit rate — the only reliable signals are edge size and empirical hit rate.
-MIN_CONF_PARLAY  = 0.65   # composite model confidence floor
-MIN_HIT_RATE     = 0.65   # raised from 0.62 — historical hit rate is our best signal
-MIN_P_HIT_PARLAY = 0.68   # model probability floor
-MIN_EDGE_PCT_PARLAY = 0.20  # only include picks with ≥20% edge — live data shows
-                             # 8-25% edge hits at 45%, 25%+ hits at 54-59%
+MIN_CONF_PARLAY  = 0.68   # raised from 0.65 — 65% bucket only hitting 49.5% real (2026-06-08)
+MIN_HIT_RATE     = 0.67   # raised from 0.65 — only use picks with strong historical backing
+MIN_P_HIT_PARLAY = 0.70   # raised from 0.68 — model is overconfident by ~15pp
+MIN_EDGE_PCT_PARLAY = 0.22  # raised slightly — 25%+ edge zone hits at 54-59%
 # UNDER picks banned from parlays entirely.
 # Live data (558 resolved picks): OVER hits 59%, UNDER hits 29%.
 # UNDERs fail because PrizePicks sets low lines after a player slump —
 # by the time our 10-game avg says UNDER, the line is already priced for it.
-PARLAY_OVERS_ONLY = False   # keeping UNDERs in to gather more data — revisit after ~1 week
+PARLAY_OVERS_ONLY = True    # UNDER 29% vs OVER 59% (902 resolved picks, 2026-06-08) — ban UNDERs
 # Max gap the model probability can exceed empirical hit rate.
 # If model says 93% but history says 60%, we cap p_hit at 75%.
 MAX_MODEL_OVERREACH = 0.15
