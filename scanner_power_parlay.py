@@ -38,7 +38,8 @@ LEAGUE_IDS = {"NBA": 7, "MLB": 2, "WNBA": 3, "TENNIS": 5, "SOCCER": 82, "NHL": 8
 PP_PAYOUTS   = {2: 3.0, 3: 6.0, 4: 10.0, 5: 20.0}
 PP_BREAKEVEN = {n: 1 / p for n, p in PP_PAYOUTS.items()}  # fraction parlay must hit
 
-MIN_CONF      = 0.68   # raised from 0.65 — 65% bucket hitting 49.5% real (2026-06-08)
+MIN_CONF      = 0.70   # raised from 0.68 — 1000-pick data: 65-70% bucket hits 44% (n=57 bet picks)
+                       #                    70-75% hits 54%, 75-80% hits 60% — real signal starts at 70%
 MIN_EDGE_PCT  = 0.08   # minimum 8% gap between player avg and PP line
 MIN_GAMES       = 6    # minimum game history required (MLB needs 6+ starts for reliability)
 MIN_GAMES_NBA   = 8    # NBA needs more games for stability
@@ -1072,6 +1073,26 @@ def score_pick(stats: dict, pick: dict) -> dict:
         result["confidence"] = 0.0
         result["conf_pct"]   = 0
         result["skip_reason"] = f"Edge too small ({edge_pct:.1%} < 8%)"
+        return result
+
+    # DNP/Activity gate: skip MLB batter OVER picks where the player has a high
+    # rate of zero-production games — strong indicator of bench/platoon role or
+    # injury absence. 1000-pick data: 21% of all OVER picks were automatic losses
+    # from players not in the lineup (actual=0.0 or negative Fantasy Score).
+    # p_zero_game = fraction of recent games with 0 production in this stat.
+    # Threshold: >35% zero games = player not reliable enough to bet OVER on.
+    direction = pick.get("direction", "OVER")
+    p_zero = stats.get("p_zero_game", 0.0)
+    if (sport == "MLB"
+            and direction == "OVER"
+            and stat_type not in _PITCHER_STAT_TYPES
+            and p_zero > 0.35):
+        result = {**pick, **stats}
+        result["confidence"] = 0.0
+        result["conf_pct"]   = 0
+        result["skip_reason"] = (
+            f"High DNP risk: {p_zero:.0%} of recent games with zero production"
+        )
         return result
 
     # 1. Hit rate (20%)

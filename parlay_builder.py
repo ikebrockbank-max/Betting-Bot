@@ -91,8 +91,12 @@ EXCLUDED_STAT_TYPES = {
     "Strikeouts",           # same stat, alternate API name
     "Pitching Outs",        # 0% actual hit rate (6 picks)
     "Hits Allowed",         # 33% actual hit rate (15 picks)
+    "Pitcher Fantasy Score",# OVER: 0/3 = 0% confirmed (2026-06-10, 1000-pick dataset)
+                            # Structural: pitchers get pulled early (injury/count),
+                            # capping Fantasy Score well below the set line.
+                            # UNDER hits 100% (4/4) but banned by PARLAY_OVERS_ONLY.
     # MLB batter — confirmed bad or unresolvable
-    "Hitter Strikeouts",    # 44% actual hit rate (32 picks) — below breakeven
+    "Hitter Strikeouts",    # 44% raw (32 picks); 83% on 6 bet picks — n too small to re-include
     "Hits+Runs+RBIs",       # composite: 3 uncorrelated stats inflate false confidence
     # NBA/WNBA — confirmed bad
     "Turnovers",            # 29% actual hit rate (24 picks)
@@ -101,22 +105,27 @@ EXCLUDED_STAT_TYPES = {
     # WNBA combos — small sample, keep excluded until n≥30
     "Pts+Rebs+Asts",        # 70% (10 picks) — promising but too few to trust
     "Pts+Rebs",             # 53% (60 picks) — marginal, keep excluded for now
-    "Pts+Asts",             # insufficient data
+    "Pts+Asts",             # 25% (20 picks) — confirmed bad
     "Rebs+Asts",            # 83% (6 picks) — tiny sample, wait for confirmation
 }
 
 # Quality gates — all three must pass for a pick to enter a parlay.
-# Calibration data (558 resolved picks) shows model confidence is uncorrelated
-# with hit rate — the only reliable signals are edge size and empirical hit rate.
-MIN_CONF_PARLAY  = 0.70   # raised from 0.65 — only 70-80% bucket shows real signal (64% actual)
-MIN_HIT_RATE     = 0.67   # raised from 0.62 — historical hit rate is our most reliable signal
-MIN_P_HIT_PARLAY = 0.70   # raised from 0.68 — model probability must agree with confidence
-MIN_EDGE_PCT_PARLAY = 0.25  # raised from 0.20 — 15-20% edge zone hits at 30% (worse than random)
-# UNDER picks banned from parlays entirely.
-# Live data (558 resolved picks): OVER hits 59%, UNDER hits 29%.
-# UNDERs fail because PrizePicks sets low lines after a player slump —
-# by the time our 10-game avg says UNDER, the line is already priced for it.
-PARLAY_OVERS_ONLY = True    # UNDER 29% vs OVER 59% (902 resolved picks, 2026-06-08) — ban UNDERs
+# 1000-pick dataset (2026-06-10): confidence buckets vs actual hit rate on BET picks:
+#   50–65%:  49% actual (n=160) — essentially random
+#   65–70%:  44% actual (n=57)  — BELOW random, active negative EV
+#   70–75%:  54% actual (n=54)  — real signal starts here
+#   75–80%:  60% actual (n=15)  — best calibrated bucket
+MIN_CONF_PARLAY  = 0.70   # 65-70% bucket hits 44% (n=57) — no edge; only 70%+ shows real signal
+MIN_HIT_RATE     = 0.67   # historical hit rate is our most reliable signal
+MIN_P_HIT_PARLAY = 0.70   # model probability must agree with confidence
+MIN_EDGE_PCT_PARLAY = 0.25  # 15-20% edge zone hits at 30% (worse than random)
+# UNDER picks banned from parlays.
+# Early data showed OVER 59% vs UNDER 29% (biased subset).
+# Full 1000-pick dataset: OVER bet picks 51% (n=71), UNDER bet picks 49% (n=61).
+# Directional edge is now minimal but UNDERs on isolated stat types still drag
+# (Total Bases UNDER: 0%, Pitcher Fantasy Score UNDER: banned due to structural 0% OVER).
+# Keep OVERS_ONLY until we have 150+ UNDER bet picks to confirm edge or no-edge.
+PARLAY_OVERS_ONLY = True    # Revisit when UNDER bet pick n ≥ 150 (currently 61)
 # Max gap the model probability can exceed empirical hit rate.
 # If model says 93% but history says 60%, we cap p_hit at 75%.
 MAX_MODEL_OVERREACH = 0.15

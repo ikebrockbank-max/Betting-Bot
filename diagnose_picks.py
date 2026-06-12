@@ -272,6 +272,42 @@ def analyze():
         rate = d["hits"] / d["total"]
         print(f"  {date}:  {pct(d['hits'], d['total']):<18} {bar(rate, 15)}")
 
+    # ── 13a. DNP / Zero-production analysis ───────────────────────────────
+    section("13a. DNP / Zero-production — automatic losses from player not starting")
+    # A resolved OVER pick with actual=0.0 or actual<0 strongly indicates
+    # the player was scratched or had no plate appearances (DNP).
+    # These are automatic losses that the model cannot predict from stats alone.
+    all_resolved_over = [p for p in picks if p.get("direction") == "OVER"
+                         and p.get("actual_value") is not None]
+    bet_over = [p for p in bet if p.get("direction") == "OVER"
+                and p.get("actual_value") is not None]
+
+    # Zero/negative actual = likely DNP
+    all_dnp = [p for p in all_resolved_over if (p.get("actual_value") or 0) <= 0]
+    bet_dnp = [p for p in bet_over if (p.get("actual_value") or 0) <= 0]
+
+    print(f"  All OVER picks with actual ≤ 0 (DNP/no-production): "
+          f"{len(all_dnp)}/{len(all_resolved_over)} = "
+          f"{len(all_dnp)/len(all_resolved_over):.1%}" if all_resolved_over else "  No OVER picks resolved")
+    print(f"  Bet OVER picks with actual ≤ 0 (DNP/no-production): "
+          f"{len(bet_dnp)}/{len(bet_over)} = "
+          f"{len(bet_dnp)/len(bet_over):.1%}" if bet_over else "  No bet OVER picks resolved")
+
+    # Adjusted OVER hit rate excluding DNPs
+    non_dnp_bet = [p for p in bet_over if (p.get("actual_value") or 0) > 0]
+    non_dnp_hits = sum(1 for p in non_dnp_bet if p.get("result") == "hit")
+    if non_dnp_bet:
+        print(f"  OVER hit rate excl. DNP:  {pct(non_dnp_hits, len(non_dnp_bet))}"
+              f"  (vs {pct(sum(1 for p in bet_over if p.get('result')=='hit'), len(bet_over))} including DNP)")
+        print(f"  ↑ This is the TRUE model accuracy — the gap shows DNP drag")
+
+    # DNP by sport
+    for sport in ["MLB", "WNBA", "NBA"]:
+        sp = [p for p in all_resolved_over if p.get("sport") == sport]
+        sd = [p for p in sp if (p.get("actual_value") or 0) <= 0]
+        if len(sp) >= 5:
+            print(f"  {sport} DNP rate: {len(sd)}/{len(sp)} = {len(sd)/len(sp):.1%}")
+
     # ── 13. Key hypothesis tests ─────────────────────────────────────────
     section("13. Key hypotheses")
 
