@@ -42,6 +42,13 @@ ELITE_P_HIT    = 1.01   # disabled — no player appears in more than 1 parlay e
 MAX_RISK_PCT   = 0.80   # never allocate more than 80% of bankroll across all parlays
 POOL_LIMIT     = 25     # only consider top-N picks by p_hit when generating combos
 
+# Sport-level calibration multipliers — applied to p_hit for pool ranking and Kelly.
+# Based on 3259-pick dataset: WNBA bet picks 60% (n=72) vs MLB 52% (n=634).
+# A 1.06x multiplier on WNBA effectively recalibrates to observed accuracy.
+SPORT_MULTIPLIERS = {
+    "WNBA": 1.06,
+}
+
 # ── Tiered slot system ─────────────────────────────────────────────────────────
 # Reserves specific slots per leg count so the portfolio always has a mix.
 # Adjust these to change the parlay style (e.g. more bankers = more conservative).
@@ -96,6 +103,8 @@ EXCLUDED_STAT_TYPES = {
     "Hitter Strikeouts",    # 49% (37 bet picks) — coin flip, confirmed bad
     "Hits+Runs+RBIs",       # composite: 3 uncorrelated stats inflate false confidence
     "Singles",              # 50% (121 bet picks) — coin flip, no edge
+    # MLB pitcher (batter-facing stats) — confirmed bad
+    "Earned Runs Allowed",  # 42% (19 bet picks) — OVER 43%, UNDER 42%, both bad
     # NBA/WNBA — confirmed bad
     "Turnovers",            # 30.6% hit rate (49 picks) — confirmed terrible
     "3-PT Made",            # 36.4% hit rate (11 picks)
@@ -156,14 +165,18 @@ def _get_p_hit(pick: dict) -> float:
         # Use `is not None` not `> 0.10` — hit_rate=0.0 is a real value (player
         # never hit this line) and should still cap the model, not be skipped.
         conf = pick.get("confidence", 0.62)
-        if hit_rate is not None:
-            return min(conf, hit_rate + MAX_MODEL_OVERREACH)
-        return conf
+        sport = pick.get("sport", "")
+        base = min(conf, hit_rate + MAX_MODEL_OVERREACH) if hit_rate is not None else conf
+        return min(0.95, base * SPORT_MULTIPLIERS.get(sport, 1.0))
 
     # Cap: model can't claim more than hit_rate + MAX_MODEL_OVERREACH.
     # hit_rate=0.0 is falsy but it IS a real value — use `is not None`.
     if hit_rate is not None:
         model_p = min(model_p, hit_rate + MAX_MODEL_OVERREACH)
+
+    # Sport calibration: WNBA empirically hits 60% vs MLB 52% — upward adjust.
+    sport = pick.get("sport", "")
+    model_p = min(0.95, model_p * SPORT_MULTIPLIERS.get(sport, 1.0))
 
     return model_p
 

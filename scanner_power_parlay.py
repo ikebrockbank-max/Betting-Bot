@@ -1077,16 +1077,15 @@ def score_pick(stats: dict, pick: dict) -> dict:
 
     # DNP/Activity gate: skip MLB batter OVER picks where the player has a high
     # rate of zero-production games — strong indicator of bench/platoon role or
-    # injury absence. 1000-pick data: 21% of all OVER picks were automatic losses
-    # from players not in the lineup (actual=0.0 or negative Fantasy Score).
+    # injury absence. 3259-pick data: 33.4% MLB DNP rate (actual≤0), all auto-losses.
     # p_zero_game = fraction of recent games with 0 production in this stat.
-    # Threshold: >35% zero games = player not reliable enough to bet OVER on.
+    # Threshold: >20% zero games = player not reliable enough to bet OVER on.
     direction = pick.get("direction", "OVER")
     p_zero = stats.get("p_zero_game", 0.0)
     if (sport == "MLB"
             and direction == "OVER"
             and stat_type not in _PITCHER_STAT_TYPES
-            and p_zero > 0.35):
+            and p_zero > 0.20):
         result = {**pick, **stats}
         result["confidence"] = 0.0
         result["conf_pct"]   = 0
