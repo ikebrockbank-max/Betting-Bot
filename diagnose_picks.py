@@ -20,17 +20,29 @@ _SB_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 
 
 def _fetch(params: str) -> list[dict]:
+    import re
     headers = {
         "apikey": _SB_KEY,
         "Authorization": f"Bearer {_SB_KEY}",
         "Accept": "application/json",
     }
-    req = urllib.request.Request(
-        f"{_SB_URL}/rest/v1/pick_log?{params}",
-        headers=headers,
-    )
-    resp = json.loads(urllib.request.urlopen(req, timeout=15).read())
-    return resp if isinstance(resp, list) else []
+    clean = re.sub(r"&?limit=\d+", "", params).lstrip("&")
+    all_rows: list[dict] = []
+    offset = 0
+    page = 1000
+    while True:
+        req = urllib.request.Request(
+            f"{_SB_URL}/rest/v1/pick_log?{clean}&limit={page}&offset={offset}",
+            headers=headers,
+        )
+        batch = json.loads(urllib.request.urlopen(req, timeout=15).read())
+        if not isinstance(batch, list):
+            break
+        all_rows.extend(batch)
+        if len(batch) < page:
+            break
+        offset += page
+    return all_rows
 
 
 def pct(hits, total):

@@ -156,9 +156,21 @@ def _sb_patch(pick_date: str, player: str, stat_type: str, updates: dict) -> boo
         return False
 
 def _sb_fetch(params: str = "select=*") -> list[dict]:
-    """Fetch rows from pick_log."""
-    result = _sb_request("GET", _TABLE, params=params)
-    return result if isinstance(result, list) else []
+    """Fetch ALL rows from pick_log, paginating past the 1000-row server cap."""
+    import re
+    clean = re.sub(r"&?limit=\d+", "", params).lstrip("&")
+    all_rows: list[dict] = []
+    offset = 0
+    page = 1000
+    while True:
+        batch = _sb_request("GET", _TABLE, params=f"{clean}&limit={page}&offset={offset}")
+        if not isinstance(batch, list):
+            break
+        all_rows.extend(batch)
+        if len(batch) < page:
+            break
+        offset += page
+    return all_rows
 
 
 # ── Local JSON fallback ───────────────────────────────────────────────────────
