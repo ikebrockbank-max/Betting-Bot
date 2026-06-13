@@ -354,8 +354,10 @@ def update_stat_calibration():
     if not _sb_available():
         return
 
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=90)).isoformat()
     resolved = _sb_fetch_table("pick_log",
-        "select=sport,stat_type,confidence,result&resolved=eq.true&limit=5000")
+        f"select=sport,stat_type,confidence,result&resolved=eq.true&pick_date=gte.{cutoff}")
     if not resolved:
         return
 
@@ -595,16 +597,31 @@ def update_results(target_date: str = None):
     return resolved_count
 
 
-def _load_resolved() -> list[dict]:
-    """Load all resolved picks — from Supabase or local file."""
+_resolved_cache: list[dict] | None = None
+_resolved_cache_days: int | None = None
+
+def _load_resolved(days_back: int = 60) -> list[dict]:
+    """Load resolved picks — last N days to limit egress. Pass 0 for full history.
+    Results are cached for the lifetime of the process to avoid redundant fetches."""
+    global _resolved_cache, _resolved_cache_days
+    if _resolved_cache is not None and _resolved_cache_days == days_back:
+        return _resolved_cache
     if _sb_available():
-        rows = _sb_fetch("select=*&resolved=eq.true&order=pick_date.desc&limit=2000")
+        if days_back:
+            from datetime import date, timedelta
+            cutoff = (date.today() - timedelta(days=days_back)).isoformat()
+            params = f"select=*&resolved=eq.true&pick_date=gte.{cutoff}&order=pick_date.desc"
+        else:
+            params = "select=*&resolved=eq.true&order=pick_date.desc"
+        rows = _sb_fetch(params)
         # Normalise column names from DB to internal names
         for r in rows:
             r.setdefault("avg",       r.pop("avg_val", 0))
             r.setdefault("actual",    r.pop("actual_value", None))
             r.setdefault("hit",       r.get("result") == "hit" if r.get("result") else None)
             r.setdefault("date",      r.get("pick_date", ""))
+        _resolved_cache = rows
+        _resolved_cache_days = days_back
         return rows
     else:
         return [e for e in _local_load()

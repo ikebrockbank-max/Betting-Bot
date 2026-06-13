@@ -67,9 +67,16 @@ def subsection(title):
     print(f"\n  ── {title} ──")
 
 
-def analyze():
-    print("Fetching all resolved picks from Supabase...")
-    picks = _fetch("select=*&resolved=eq.true&limit=5000&order=pick_date.desc")
+def analyze(days_back: int | None = 30):
+    if days_back:
+        from datetime import date, timedelta
+        cutoff = (date.today() - timedelta(days=days_back)).isoformat()
+        params = f"select=*&resolved=eq.true&pick_date=gte.{cutoff}&order=pick_date.desc"
+        print(f"Fetching resolved picks from last {days_back} days (since {cutoff})...")
+    else:
+        params = "select=*&resolved=eq.true&order=pick_date.desc"
+        print("Fetching ALL resolved picks from Supabase (full history)...")
+    picks = _fetch(params)
     if not picks:
         print("No resolved picks found.")
         return
@@ -363,4 +370,6 @@ def analyze():
 
 
 if __name__ == "__main__":
-    analyze()
+    import sys
+    full = "--full" in sys.argv
+    analyze(days_back=None if full else 30)
