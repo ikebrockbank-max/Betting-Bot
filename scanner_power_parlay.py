@@ -1129,6 +1129,27 @@ def score_pick(stats: dict, pick: dict) -> dict:
         )
         return result
 
+    # Lineup confirmation gate (MLB batters only).
+    # When lineups are posted (typically 2-4h before gametime), skip any OVER
+    # pick for a batter who isn't in the confirmed batting order — they won't
+    # play, making an OVER an auto-loss.
+    # Returns None when lineup hasn't been posted yet → fall through normally.
+    # Wrapped in try/except so a lineup API failure never blocks scoring.
+    if sport == "MLB" and direction == "OVER" and stat_type not in _PITCHER_STAT_TYPES:
+        try:
+            from data.lineups import is_player_starting as _is_starting
+            player_name = pick.get("player", "")
+            player_team = stats.get("player_team", "")
+            lineup_confirmed = _is_starting(player_name, "MLB", player_team)
+            if lineup_confirmed is False:
+                result = {**pick, **stats}
+                result["confidence"] = 0.0
+                result["conf_pct"]   = 0
+                result["skip_reason"] = "Not in confirmed batting lineup"
+                return result
+        except Exception:
+            pass  # never let lineup check block scoring
+
     # 1. Hit rate (20%)
     hit_score = hit_rate
 

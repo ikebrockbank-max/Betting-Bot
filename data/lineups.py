@@ -27,7 +27,7 @@ from pathlib import Path
 import requests
 
 CACHE_PATH = Path("logs/.lineups_cache.json")
-CACHE_TTL  = 1800  # 30 minutes
+CACHE_TTL  = 900   # 15 minutes — lineups post close to gametime; stay fresh
 
 NBA_HEADERS = {
     "User-Agent":          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -104,8 +104,10 @@ def _fetch_mlb_lineups() -> dict:
         }
       }
     """
-    today    = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    cache_key = f"mlb_lineups_{today}"
+    now      = datetime.now(timezone.utc)
+    # 15-minute bucket so cache auto-refreshes across scans (10 AM / 2 PM / 6 PM)
+    bucket   = (now.hour * 60 + now.minute) // 15
+    cache_key = f"mlb_lineups_{now.strftime('%Y-%m-%d')}_{bucket}"
     cached   = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -115,7 +117,7 @@ def _fetch_mlb_lineups() -> dict:
             "https://statsapi.mlb.com/api/v1/schedule",
             params={
                 "sportId": 1,
-                "date":    today,
+                "date":    now.strftime("%Y-%m-%d"),
                 "hydrate": "probablePitcher,lineups,teams",
             },
             timeout=15,
@@ -347,7 +349,8 @@ def _is_starting_mlb(player_name: str, team: str) -> bool | None:
     if not lineups:
         return None
 
-    # Search all games for the player
+    # Pass 1: search ALL posted lineups for the player (handles trades where
+    # our historical player_team is stale — e.g. Alonso traded from NYM to BAL).
     any_lineup_posted = False
     for game_key, game in lineups.items():
         home_lineup = game.get("home_lineup", [])
@@ -355,36 +358,34 @@ def _is_starting_mlb(player_name: str, team: str) -> bool | None:
         all_names   = home_lineup + away_lineup
 
         if not all_names:
-            continue  # lineups not posted for this game yet
+            continue
 
         any_lineup_posted = True
 
-        # If team is specified, narrow to that team's lineup
-        if team:
-            team_last = _last_word(team)
-            home_last = _last_word(game.get("home_team", ""))
-            away_last = _last_word(game.get("away_team", ""))
-
-            if team_last == home_last:
-                all_names = home_lineup
-            elif team_last == away_last:
-                all_names = away_lineup
-
         for name in all_names:
             if _name_match(player_name, name):
-                return True
+                return True  # confirmed starter, regardless of recorded team
 
-        # Only return False if lineups were posted but player not found
-        # and the team matches (to avoid false negatives from wrong game)
-        if team and any_lineup_posted:
-            return False
-
-    # Lineups not yet posted
+    # Player not found anywhere.
     if not any_lineup_posted:
-        return None
+        return None   # lineups not posted yet for any game — can't say
 
-    # Player not found in any posted lineup
-    return False
+    # At least one lineup is posted and player isn't in any of them.
+    # Still need caution: their specific game's lineup might not be posted yet.
+    # Only return False if we can confirm their team's lineup is posted.
+    if team:
+        team_last = _last_word(team)
+        for game_key, game in lineups.items():
+            home_last = _last_word(game.get("home_team", ""))
+            away_last = _last_word(game.get("away_team", ""))
+            if team_last in (home_last, away_last):
+                game_lineup = game.get("home_lineup", []) + game.get("away_lineup", [])
+                if game_lineup:
+                    return False  # their game's lineup IS posted and they're not in it
+                return None       # their game's lineup not posted yet
+
+    # No team info — can't confirm if their specific game lineup is posted
+    return None
 
 
 def _is_starting_nba(player_name: str, team: str) -> bool | None:
