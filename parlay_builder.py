@@ -69,63 +69,58 @@ MIN_BET = 1.00   # minimum bet in dollars
 MIN_EV  = 0.03   # min 3% EV to include any parlay
 
 # ── Stat types excluded from parlays ──────────────────────────────────────────
-# Measured from 902 resolved picks (2026-06-08). Hit rate of qualified picks shown.
+# Measured from 3259 resolved picks / 706 bet picks (2026-06-13).
 #
-#   Pitching Outs          0%  — confirmed disaster, always wrong
-#   Pitcher Strikeouts     25% — model has no real edge on K variance
-#   Hits Allowed           33% — OVER is 0%, UNDER is 30%
-#   3-PT Made / 3-PT Made  33% — shooter variance completely unpredictable
-#   Turnovers              29% — high variance, model completely wrong
-#   Hitter Strikeouts      44% — below 50%, net negative EV
-#   Hits+Runs+RBIs         ~45%— composite, 3 uncorrelated stats compound error
+#   Pitching Outs          0%   (6 bet picks)  — confirmed disaster
+#   Hits Allowed           38%  (21 bet picks) — model consistently wrong
+#   Pitcher Strikeouts     46%  (24 bet picks) — no edge
+#   Hitter Strikeouts      49%  (37 bet picks) — coin flip confirmed
+#   Singles                50%  (121 bet picks)— coin flip with large n
+#   Hits+Runs+RBIs         n/a  — composite stat, 3 uncorrelated vars compound error
+#   Turnovers              30%  (49 all picks) — terrible
+#   3-PT Made              36%  (11 all picks) — terrible
 #
-# Fantasy Score types: now tracked properly (PrizePicks formula implemented
-# in calibration_tracker). Keep in scan, filter from parlays until 30+ picks resolve.
-#
-# WNBA combos (Pts+Rebs+Asts etc): small sample looks good (70-83%) but n<15.
-# Keep excluded from parlays until 30+ resolved picks confirm the signal.
+# WNBA combos: promising but below n≥30 threshold for inclusion.
+#   Pts+Rebs+Asts: 73% (11 bet picks), Pts+Asts: 60% (10), Rebs+Asts: 86% (7)
+#   Revisit when each hits 30+ resolved bet picks.
 #
 EXCLUDED_STAT_TYPES = {
     # MLB pitcher — confirmed terrible
-    "Pitcher Strikeouts",   # 25% actual hit rate (16 picks)
+    "Pitcher Strikeouts",   # 46% hit rate (24 bet picks) — no edge
     "Strikeouts",           # same stat, alternate API name
     "Pitching Outs",        # 0% actual hit rate (6 picks)
-    "Hits Allowed",         # 33% actual hit rate (15 picks)
-    "Pitcher Fantasy Score",# OVER: 0/3 = 0% confirmed (2026-06-10, 1000-pick dataset)
-                            # Structural: pitchers get pulled early (injury/count),
-                            # capping Fantasy Score well below the set line.
-                            # UNDER hits 100% (4/4) but banned by PARLAY_OVERS_ONLY.
-    # MLB batter — confirmed bad or unresolvable
-    "Hitter Strikeouts",    # 44% raw (32 picks); 83% on 6 bet picks — n too small to re-include
+    "Hits Allowed",         # 38% hit rate (21 bet picks) — confirmed bad
+    "Pitcher Fantasy Score",# OVER: 0/4 = 0% (structural: pitchers pulled early)
+                            # UNDER hits 100% (10/10) but banned by PARLAY_OVERS_ONLY.
+    # MLB batter — confirmed bad
+    "Hitter Strikeouts",    # 49% (37 bet picks) — coin flip, confirmed bad
     "Hits+Runs+RBIs",       # composite: 3 uncorrelated stats inflate false confidence
+    "Singles",              # 50% (121 bet picks) — coin flip, no edge
     # NBA/WNBA — confirmed bad
-    "Turnovers",            # 29% actual hit rate (24 picks)
-    "3-PT Made",            # 33% actual hit rate (6 picks)
+    "Turnovers",            # 30.6% hit rate (49 picks) — confirmed terrible
+    "3-PT Made",            # 36.4% hit rate (11 picks)
     "3-Pointers Made",      # same stat, alternate name
-    # WNBA combos — small sample, keep excluded until n≥30
-    "Pts+Rebs+Asts",        # 70% (10 picks) — promising but too few to trust
-    "Pts+Rebs",             # 53% (60 picks) — marginal, keep excluded for now
-    "Pts+Asts",             # 25% (20 picks) — confirmed bad
-    "Rebs+Asts",            # 83% (6 picks) — tiny sample, wait for confirmation
+    # WNBA combos — promising but below n≥30 threshold
+    "Pts+Rebs+Asts",        # 73% (11 bet picks) — good signal but wait for n≥30
+    "Pts+Rebs",             # 53% (15 bet picks) — marginal, wait for n≥30
+    "Pts+Asts",             # 60% (10 bet picks) — looks better now, wait for n≥30
+    "Rebs+Asts",            # 86% (7 bet picks) — tiny sample, wait for n≥30
 }
 
 # Quality gates — all three must pass for a pick to enter a parlay.
-# 1000-pick dataset (2026-06-10): confidence buckets vs actual hit rate on BET picks:
-#   50–65%:  49% actual (n=160) — essentially random
-#   65–70%:  44% actual (n=57)  — BELOW random, active negative EV
-#   70–75%:  54% actual (n=54)  — real signal starts here
-#   75–80%:  60% actual (n=15)  — best calibrated bucket
-MIN_CONF_PARLAY  = 0.70   # 65-70% bucket hits 44% (n=57) — no edge; only 70%+ shows real signal
+# 3259-pick dataset (2026-06-13): confidence buckets vs actual hit rate on BET picks:
+#   65–70%:  47% actual (n=196) — negative EV
+#   70–75%:  54% actual (n=280) — real signal, positive EV
+#   75–80%:  57% actual (n=194) — best bucket
+#   80–85%:  55% actual (n=33)  — over-confident, model thinks 82% but hits 55%
+MIN_CONF_PARLAY  = 0.70   # 65-70% bucket hits 47% (n=196 bet picks) — no edge below 70%
 MIN_HIT_RATE     = 0.67   # historical hit rate is our most reliable signal
 MIN_P_HIT_PARLAY = 0.70   # model probability must agree with confidence
-MIN_EDGE_PCT_PARLAY = 0.25  # 15-20% edge zone hits at 30% (worse than random)
+MIN_EDGE_PCT_PARLAY = 0.25  # 15-20% edge zone hits 38% (n=32) — worse than random
 # UNDER picks banned from parlays.
-# Early data showed OVER 59% vs UNDER 29% (biased subset).
-# Full 1000-pick dataset: OVER bet picks 51% (n=71), UNDER bet picks 49% (n=61).
-# Directional edge is now minimal but UNDERs on isolated stat types still drag
-# (Total Bases UNDER: 0%, Pitcher Fantasy Score UNDER: banned due to structural 0% OVER).
-# Keep OVERS_ONLY until we have 150+ UNDER bet picks to confirm edge or no-edge.
-PARLAY_OVERS_ONLY = True    # Revisit when UNDER bet pick n ≥ 150 (currently 61)
+# 3259-pick dataset: OVER bet picks 56% (n=478), UNDER bet picks 47% (n=228).
+# UNDERs confirmed bad with n≥150 — OVERS_ONLY is the correct long-term policy.
+PARLAY_OVERS_ONLY = True    # Confirmed: UNDER 47% (n=228) vs OVER 56% (n=478)
 # Max gap the model probability can exceed empirical hit rate.
 # If model says 93% but history says 60%, we cap p_hit at 75%.
 MAX_MODEL_OVERREACH = 0.15
