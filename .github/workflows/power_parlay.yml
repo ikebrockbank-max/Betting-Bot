@@ -128,3 +128,6 @@ jobs:
           echo ""
           echo "--- DEEP DIVE DIAGNOSTIC ---"
           python3 diagnose_picks.py
+          echo ""
+          echo "--- UNDER ANALYSIS ---"
+          python3 analyze_unders.py
