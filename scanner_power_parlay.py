@@ -1079,18 +1079,25 @@ def score_pick(stats: dict, pick: dict) -> dict:
     # rate of zero-production games — strong indicator of bench/platoon role or
     # injury absence. 3259-pick data: 33.4% MLB DNP rate (actual≤0), all auto-losses.
     # p_zero_game = fraction of recent games with 0 production in this stat.
-    # Threshold: >20% zero games = player not reliable enough to bet OVER on.
+    #
+    # Threshold split by stat type:
+    #   Binary stats (Hits, Total Bases, Singles): zero always means DNP or 0-fer.
+    #     Use 0.20 — any player sitting out 20%+ is too risky for OVER.
+    #   Cumulative stats (Runs, HFS, Walks): zero is normal game variance even for
+    #     good starters. Use 0.30 — only filter true bench/platoon risk.
+    _BINARY_STATS = {"Hits", "Total Bases", "Singles", "Stolen Bases"}
     direction = pick.get("direction", "OVER")
     p_zero = stats.get("p_zero_game", 0.0)
+    p_zero_threshold = 0.20 if stat_type in _BINARY_STATS else 0.30
     if (sport == "MLB"
             and direction == "OVER"
             and stat_type not in _PITCHER_STAT_TYPES
-            and p_zero > 0.20):
+            and p_zero > p_zero_threshold):
         result = {**pick, **stats}
         result["confidence"] = 0.0
         result["conf_pct"]   = 0
         result["skip_reason"] = (
-            f"High DNP risk: {p_zero:.0%} of recent games with zero production"
+            f"High DNP risk: {p_zero:.0%} zero-production games (threshold {p_zero_threshold:.0%})"
         )
         return result
 
