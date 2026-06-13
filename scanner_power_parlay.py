@@ -68,12 +68,30 @@ def _log(msg: str):
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     print(f"[parlay {ts}] {msg}", flush=True)
 
-def _get_json(url: str, extra_headers: dict = None) -> dict:
+def _get_json(url: str, extra_headers: dict = None, retries: int = 3) -> dict:
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     if extra_headers:
         headers.update(extra_headers)
     req = urllib.request.Request(url, headers=headers)
-    return json.loads(urllib.request.urlopen(req, timeout=5).read())
+    import urllib.error
+    for attempt in range(retries):
+        try:
+            return json.loads(urllib.request.urlopen(req, timeout=10).read())
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < retries - 1:
+                wait = 2 ** (attempt + 1)   # 2s, 4s, 8s
+                _log(f"Rate limited (429) — retrying in {wait}s (attempt {attempt + 1}/{retries})")
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError("_get_json: exhausted retries")
+
+
+# Process-level raw API response cache.
+# fetch_standard_lines populates this; fetch_typed_lines reads from it
+# to avoid duplicate API calls that trigger 429 rate limits.
+# Key: (sport, today_str) → raw PrizePicks API response dict.
+_pp_raw_cache: dict[tuple, dict] = {}
 
 def _cache(key: str, ttl: int = 1800):
     """Decorator-style: return cached value if fresh, else None."""
@@ -158,6 +176,9 @@ def fetch_standard_lines(sports: list[str] = None, days_ahead: int = 1) -> list[
             url = (f"https://api.prizepicks.com/projections"
                    f"?league_id={lid}&per_page=500&single_stat=true&state_code=AZ")
             data = _get_json(url, {"Referer": "https://app.prizepicks.com/"})
+            # Cache raw response so fetch_typed_lines can reuse it without
+            # making a second API call (which triggers 429 rate limits).
+            _pp_raw_cache[(sport, today_str)] = data
             players = {
                 p["id"]: p["attributes"].get("name", "?")
                 for p in data.get("included", [])
@@ -247,9 +268,16 @@ def fetch_typed_lines(sports: list[str], odds_type: str) -> list[dict]:
             continue
 
         try:
-            url = (f"https://api.prizepicks.com/projections"
-                   f"?league_id={lid}&per_page=500&single_stat=true&state_code=AZ")
-            data = _get_json(url, {"Referer": "https://app.prizepicks.com/"})
+            # Reuse the raw response cached by fetch_standard_lines if available —
+            # both functions call the same URL, so the second/third call is free.
+            raw_cached = _pp_raw_cache.get((sport, today_str))
+            if raw_cached is not None:
+                data = raw_cached
+            else:
+                url = (f"https://api.prizepicks.com/projections"
+                       f"?league_id={lid}&per_page=500&single_stat=true&state_code=AZ")
+                data = _get_json(url, {"Referer": "https://app.prizepicks.com/"})
+                _pp_raw_cache[(sport, today_str)] = data
             players = {
                 p["id"]: p["attributes"].get("name", "?")
                 for p in data.get("included", [])

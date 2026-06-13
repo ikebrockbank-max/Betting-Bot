@@ -134,7 +134,7 @@ MIN_HIT_RATE_UNDER_EXCEPTION = 0.75  # stricter than OVER floor (0.67) — limit
 MIN_CONF_PARLAY  = 0.70   # 65-70% bucket hits 47% (n=196 bet picks) — no edge below 70%
 MIN_HIT_RATE     = 0.67   # historical hit rate is our most reliable signal
 MIN_P_HIT_PARLAY = 0.70   # model probability must agree with confidence
-MIN_EDGE_PCT_PARLAY = 0.25  # 15-20% edge zone hits 38% (n=32) — worse than random
+MIN_EDGE_PCT_PARLAY = 0.30  # 15-25% edge zone hits 38-45% (n=32) — cut below 30%
 # UNDER picks banned from parlays.
 # 3259-pick dataset: OVER bet picks 56% (n=478), UNDER bet picks 47% (n=228).
 # UNDERs confirmed bad with n≥150 — OVERS_ONLY is the correct long-term policy.
@@ -351,7 +351,20 @@ def build_diverse_parlays(
             seen_players.add(player)
             deduped.append(p)
 
-    pool = deduped[:POOL_LIMIT]
+    # Cap "Hitter Fantasy Score" picks — HFS dominates the pool on MLB days
+    # (every player has an HFS line) and creates high intra-portfolio correlation.
+    # Max 4 HFS picks in the 25-pick pool so other stat types get representation.
+    MAX_HFS_IN_POOL = 4
+    hfs_count = 0
+    capped: list[dict] = []
+    for p in deduped:
+        if p.get("stat_type") == "Hitter Fantasy Score":
+            if hfs_count >= MAX_HFS_IN_POOL:
+                continue
+            hfs_count += 1
+        capped.append(p)
+
+    pool = capped[:POOL_LIMIT]
 
     if len(pool) < 2:
         return []
