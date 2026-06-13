@@ -591,11 +591,12 @@ def format_parlay_plan(
 
 def format_parlay_ntfy(parlays: list[dict], bankroll: float,
                        goblin_parlays: list[dict] = None,
-                       demon_parlays:  list[dict] = None) -> tuple[str, str]:
+                       demon_parlays:  list[dict] = None,
+                       top_picks: list[dict] = None) -> tuple[str, str]:
     """
     Returns (title, body) for ntfy push notification.
     Human-readable format — designed for phone screen.
-    Shows standard parlays + goblin + demon as separate sections.
+    Shows top individual picks, then standard + goblin + demon parlays.
     """
     all_parlays = parlays or []
     has_any = all_parlays or goblin_parlays or demon_parlays
@@ -620,6 +621,21 @@ def format_parlay_ntfy(parlays: list[dict], bankroll: float,
 
     lines = []
 
+    # Top individual picks — the strongest signals regardless of parlay eligibility
+    if top_picks:
+        lines.append("── TOP PICKS ──")
+        for p in top_picks[:6]:
+            arrow  = "↑" if p.get("direction") == "OVER" else "↓"
+            sport  = p.get("sport", "")
+            e      = {"MLB": "⚾", "WNBA": "🏀", "NBA": "🏀", "NHL": "🏒"}.get(sport, "🎯")
+            conf   = p.get("conf_pct") or int(p.get("confidence", 0) * 100)
+            hr     = int(p.get("hit_rate", 0) * 100)
+            lines.append(
+                f"  {e}{arrow} {p['player']} {p.get('direction','OVER')} {p['line']} "
+                f"{p['stat_type']} ({conf}% · {hr}% HR)"
+            )
+        lines.append("")
+
     # Standard parlays
     for i, par in enumerate(all_parlays, 1):
         bet    = par["bet_size"]
@@ -630,7 +646,7 @@ def format_parlay_ntfy(parlays: list[dict], bankroll: float,
         lines.append(f"── Standard {i}: ${bet:.0f}→${win:.0f} | {n_legs}-pick {payout}x | {p_win}% ──")
         for leg in par["leg_summary"]:
             arrow = "↑" if leg["direction"] == "OVER" else "↓"
-            lines.append(f"  {arrow} {leg['player']} — OVER {leg['line']} {leg['stat_type']}  ({int(leg['hit_rate']*100)}% HR, avg {leg['avg']})")
+            lines.append(f"  {arrow} {leg['player']} — {leg['direction']} {leg['line']} {leg['stat_type']}  ({int(leg['hit_rate']*100)}% HR, avg {leg['avg']})")
         lines.append("")
 
     # Goblin parlay
