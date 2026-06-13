@@ -300,7 +300,20 @@ def build_diverse_parlays(
         and (not PARLAY_OVERS_ONLY or p.get("direction") == "OVER")
     ]
     eligible.sort(key=_get_p_hit, reverse=True)
-    pool = eligible[:POOL_LIMIT]
+
+    # Deduplicate by player: keep only the highest-scoring pick per player.
+    # Without this, a player with Points + PRA + Pts+Rebs all scoring highly
+    # consumes 3 of 25 pool slots — but only 1 can ever enter a parlay (player
+    # uniqueness rule). The other 2 are wasted slots that crowd out other players.
+    seen_players: set[str] = set()
+    deduped: list[dict] = []
+    for p in eligible:
+        player = p.get("player", "")
+        if player not in seen_players:
+            seen_players.add(player)
+            deduped.append(p)
+
+    pool = deduped[:POOL_LIMIT]
 
     if len(pool) < 2:
         return []
