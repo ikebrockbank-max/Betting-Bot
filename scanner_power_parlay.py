@@ -1843,12 +1843,16 @@ def build_parlays(scored_picks: list[dict], max_legs: int = MAX_PARLAY) -> list[
     - p_hit >= MIN_P_HIT (probability model agrees line is clearable)
     - Parlay EV >= MIN_EV (positive expected value, not just positive probability)
     """
-    # Filter: qualitative model, empirical history, AND probability model must all agree
+    # Filter: qualitative model, empirical history, AND probability model must all agree.
+    # Mirrors parlay_builder.py eligible filter so debug log matches what's actually sent.
+    from parlay_builder import EXCLUDED_STAT_TYPES as _EXCL, PARLAY_OVERS_ONLY as _OO
     eligible = [
         p for p in scored_picks
         if p["confidence"] >= MIN_CONF
-        and p.get("hit_rate", 0) >= 0.65        # raised from 0.62 — historical floor
+        and p.get("hit_rate", 0) >= 0.65
         and _get_p_hit(p) >= MIN_P_HIT
+        and p.get("stat_type", "") not in _EXCL
+        and (not _OO or p.get("direction") == "OVER")
     ]
     eligible.sort(key=lambda x: _get_p_hit(x), reverse=True)
 
