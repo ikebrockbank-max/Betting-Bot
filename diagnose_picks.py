@@ -182,6 +182,30 @@ def analyze(days_back: int | None = 30):
         print(f"  {lo}-{hi}%    {(lo+hi)/2:.0f}%        {pct(h,len(b)):<18} {gap:+.0%}    "
               f"{flag}  (bet: {pct(hb,len(bb))})")
 
+    # ── 6b. Confidence buckets — DNPs stripped out ────────────────────────
+    section("6b. Confidence buckets EXCLUDING DNPs (actual≤0 OVER auto-losses)")
+    print("  Same buckets as above but OVER picks where player had 0 production removed.")
+    print(f"  {'Bucket':<10} {'With DNP':<14} {'Without DNP':<14} {'Lift':<8} N (ex-DNP)")
+    print(f"  {'-'*60}")
+    for lo, hi in [(65,70),(70,75),(75,80),(80,85),(85,100)]:
+        bb = [p for p in bet if lo <= (p.get("conf_pct") or 0) < hi]
+        if len(bb) < 5: continue
+        # with DNP
+        h_with = sum(1 for p in bb if p.get("result") == "hit")
+        rate_with = h_with / len(bb)
+        # without DNP: exclude OVER picks where actual <= 0
+        bb_no_dnp = [p for p in bb
+                     if not (p.get("direction") == "OVER"
+                             and (p.get("actual_value") or p.get("actual") or 1) <= 0)]
+        if not bb_no_dnp: continue
+        h_no_dnp = sum(1 for p in bb_no_dnp if p.get("result") == "hit")
+        rate_no_dnp = h_no_dnp / len(bb_no_dnp)
+        lift = rate_no_dnp - rate_with
+        flag = "✅" if rate_no_dnp >= 0.60 else ("⚠️" if rate_no_dnp >= 0.55 else "❌")
+        print(f"  {lo}-{hi}%   {rate_with:.0%} ({h_with}/{len(bb):<5})  "
+              f"{flag} {rate_no_dnp:.0%} ({h_no_dnp}/{len(bb_no_dnp):<5})  "
+              f"+{lift:.0%}     n={len(bb_no_dnp)}")
+
     # ── 7. Are we picking the right direction? ───────────────────────────
     section("7. Direction accuracy by stat type")
     print("  Checking: when we say OVER, does the player actually go OVER?")
