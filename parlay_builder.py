@@ -97,8 +97,8 @@ EXCLUDED_STAT_TYPES = {
     "Strikeouts",           # same stat, alternate API name
     "Pitching Outs",        # 0% actual hit rate (6 picks)
     "Hits Allowed",         # 38% hit rate (21 bet picks) — confirmed bad
-    "Pitcher Fantasy Score",# OVER: 0/4 = 0% (structural: pitchers pulled early)
-                            # UNDER hits 100% (10/10) but banned by PARLAY_OVERS_ONLY.
+    "Pitcher Fantasy Score",# OVER: 0/4 = 0% stays excluded.
+                            # UNDER: 100% (10/10) — unlocked via UNDER_EXCEPTIONS below.
     # MLB batter — confirmed bad
     "Hitter Strikeouts",    # 49% (37 bet picks) — coin flip, confirmed bad
     "Hits+Runs+RBIs",       # composite: 3 uncorrelated stats inflate false confidence
@@ -115,6 +115,15 @@ EXCLUDED_STAT_TYPES = {
     "Pts+Asts",             # 60% (10 bet picks) — looks better now, wait for n≥30
     "Rebs+Asts",            # 86% (7 bet picks) — tiny sample, wait for n≥30
 }
+
+# Stat types that are EXCLUDED for OVER but explicitly allowed for UNDER.
+# Each entry requires a higher hit_rate floor (see eligible filter below).
+# Data source: analyze_unders.py run 2026-06-13 on 228 UNDER bet picks.
+UNDER_EXCEPTIONS = {
+    "Pitcher Fantasy Score",  # UNDER: 100% (10/10). Structural: pitchers pulled early,
+                              # natural ceiling on fantasy production. Hit_rate floor: 0.75.
+}
+MIN_HIT_RATE_UNDER_EXCEPTION = 0.75  # stricter than OVER floor (0.67) — limited sample
 
 # Quality gates — all three must pass for a pick to enter a parlay.
 # 3259-pick dataset (2026-06-13): confidence buckets vs actual hit rate on BET picks:
@@ -256,6 +265,36 @@ def _combo_ev(combo: tuple, corr_factor: float) -> float:
     return p_win * payout - 1.0, p_win, p_indep, corr_factor
 
 
+def _passes_direction_gate(p: dict) -> bool:
+    """
+    Returns True if the pick is allowed based on stat type and direction.
+
+    Rules:
+    - Picks in EXCLUDED_STAT_TYPES are blocked UNLESS they're in UNDER_EXCEPTIONS
+      with direction=UNDER and hit_rate >= MIN_HIT_RATE_UNDER_EXCEPTION.
+    - PARLAY_OVERS_ONLY blocks all UNDERs UNLESS the stat is in UNDER_EXCEPTIONS.
+    """
+    stat = p.get("stat_type", "")
+    direction = p.get("direction", "OVER")
+    hit_rate = p.get("hit_rate", 0.0)
+
+    is_under_exception = (
+        stat in UNDER_EXCEPTIONS
+        and direction == "UNDER"
+        and hit_rate >= MIN_HIT_RATE_UNDER_EXCEPTION
+    )
+
+    # Block excluded stat types (except unlocked UNDERs)
+    if stat in EXCLUDED_STAT_TYPES and not is_under_exception:
+        return False
+
+    # Block UNDERs when PARLAY_OVERS_ONLY is set (except unlocked UNDERs)
+    if PARLAY_OVERS_ONLY and direction != "OVER" and not is_under_exception:
+        return False
+
+    return True
+
+
 def build_diverse_parlays(
     scored_picks: list[dict],
     bankroll: float = 50.0,
@@ -295,9 +334,8 @@ def build_diverse_parlays(
         if p.get("confidence", 0) >= MIN_CONF_PARLAY
         and p.get("hit_rate", 0) >= MIN_HIT_RATE
         and _get_p_hit(p) >= MIN_P_HIT_PARLAY
-        and p.get("stat_type", "") not in EXCLUDED_STAT_TYPES
         and p.get("edge_pct", 0) >= MIN_EDGE_PCT_PARLAY
-        and (not PARLAY_OVERS_ONLY or p.get("direction") == "OVER")
+        and _passes_direction_gate(p)
     ]
     eligible.sort(key=_get_p_hit, reverse=True)
 
