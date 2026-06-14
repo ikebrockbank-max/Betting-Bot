@@ -1150,6 +1150,46 @@ def score_pick(stats: dict, pick: dict) -> dict:
         except Exception:
             pass  # never let lineup check block scoring
 
+    # ── Injury report gate ────────────────────────────────────────────────────
+    # Skip any player listed as Out or Doubtful on the ESPN injury report.
+    # Flag Questionable/DTD as a warning (doesn't skip, but noted in skip_reason).
+    # Wrapped in try/except — a failed fetch never blocks scoring.
+    try:
+        from data.injuries import get_injury_report as _get_inj, check_player as _chk_inj
+        _inj_report = _get_inj(sport)
+        _inj_entry  = _chk_inj(pick.get("player", ""), _inj_report)
+        if _inj_entry and _inj_entry["disqualified"]:
+            result = {**pick, **stats}
+            result["confidence"] = 0.0
+            result["conf_pct"]   = 0
+            result["skip_reason"] = (
+                f"Injury report: {_inj_entry['status']} "
+                f"({_inj_entry['detail'] or _inj_entry['headline']})"
+            )
+            return result
+    except Exception:
+        pass
+
+    # ── Returning-from-absence gate ───────────────────────────────────────────
+    # A gap of 5+ days in the compressed WNBA/NBA schedule (games every 2-4 days)
+    # almost always means the player missed games due to injury or illness.
+    # They may be returning on a minutes restriction — making any production-based
+    # OVER unreliable (Morrow: 17 reb in 32 min healthy, 3 reb in 15 min returning).
+    # MLB: gaps of 4+ days are similarly unusual in a near-daily schedule.
+    # Does NOT apply to UNDER picks — a minutes restriction makes UNDERs more likely.
+    if direction == "OVER":
+        rest_days_val = stats.get("rest_days")
+        threshold = 5 if sport in ("NBA", "WNBA") else 4
+        if rest_days_val is not None and rest_days_val >= threshold:
+            result = {**pick, **stats}
+            result["confidence"] = 0.0
+            result["conf_pct"]   = 0
+            result["skip_reason"] = (
+                f"Returning from {rest_days_val}-day absence — "
+                f"likely injury/minutes restriction (OVER unreliable)"
+            )
+            return result
+
     # 1. Hit rate (20%)
     hit_score = hit_rate
 
