@@ -23,6 +23,7 @@ import os
 import sys
 import time
 import urllib.request
+import urllib.error
 import itertools
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -73,7 +74,6 @@ def _get_json(url: str, extra_headers: dict = None, retries: int = 3) -> dict:
     if extra_headers:
         headers.update(extra_headers)
     req = urllib.request.Request(url, headers=headers)
-    import urllib.error
     for attempt in range(retries):
         try:
             return json.loads(urllib.request.urlopen(req, timeout=10).read())
@@ -699,6 +699,11 @@ def _compute_stats(player: str, stat_type: str, line: float,
     direction  = "OVER" if avg_n > line else "UNDER"
     hit_rate   = (over_hits / n) if direction == "OVER" else (under_hits / n)
 
+    # Bayesian-adjusted hit rate: shrinks small-sample extremes toward 0.50.
+    # Prior = 8 ghost games at 50%. 8/10 → adj 66.7%, 10/10 → adj 77.8%.
+    _adj_hits = over_hits if direction == "OVER" else under_hits
+    adj_hit_rate = round((_adj_hits + 4) / (n + 8), 3)
+
     # Trend: positive means player is trending toward direction
     trend = (avg_l3 - avg_n) / (avg_n + 1e-9)
     if direction == "UNDER":
@@ -733,6 +738,7 @@ def _compute_stats(player: str, stat_type: str, line: float,
         "avg_l3":        round(avg_l3, 2),
         "avg_l5":        round(avg_l5, 2),
         "hit_rate":      round(hit_rate, 3),
+        "adj_hit_rate":  adj_hit_rate,   # Bayesian-shrunk hit rate (used by model cap)
         "over_hits":     over_hits,
         "under_hits":    under_hits,
         "n_games":       n,
@@ -1432,9 +1438,12 @@ def score_pick(stats: dict, pick: dict) -> dict:
     if inj_mult == 0:
         confidence = 0.0
 
-    # Home/away splits — surface in output
+    # Home/away splits — surface in output.
+    # ctx is preferred source; fall back to stats dict (MLB batter_stats always sets it).
     splits    = ctx.get("splits", {})
-    home_away = ctx.get("home_away", "unknown")
+    home_away = ctx.get("home_away") or stats.get("home_away") or "unknown"
+    if home_away == "unknown":
+        home_away = stats.get("home_away", "unknown")
     split_avg = splits.get("home_avg") if home_away == "home" else splits.get("away_avg")
     split_hr  = splits.get("home_hit_rate") if home_away == "home" else splits.get("away_hit_rate")
 
@@ -1834,7 +1843,9 @@ def score_pick(stats: dict, pick: dict) -> dict:
     result["confidence"]      = round(confidence, 3)
     result["conf_pct"]        = int(confidence * 100)
     result["home_away"]       = home_away
-    result["opp_team"]        = ctx.get("opp_team", "unknown")
+    # opp_team: ctx is preferred; fall back to stats dict (MLB batter_stats always sets it)
+    _ctx_opp = ctx.get("opp_team", "unknown")
+    result["opp_team"]        = _ctx_opp if _ctx_opp and _ctx_opp != "unknown" else stats.get("opp_team", "unknown")
     result["context_notes"]   = ctx.get("description", [])
     result["split_avg"]       = split_avg
     result["split_hit_rate"]  = split_hr
