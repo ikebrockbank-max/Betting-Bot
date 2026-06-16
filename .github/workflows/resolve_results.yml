@@ -41,7 +41,10 @@ jobs:
 
       - name: Resolve results
         env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          SUPABASE_URL:      https://gggozciyvjeqjnmufigp.supabase.co
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
+          ODDS_API_KEY:      ${{ secrets.ODDS_API_KEY }}
         run: |
           DATE="${{ github.event.inputs.date }}"
           if [ -n "$DATE" ]; then
@@ -51,6 +54,9 @@ jobs:
           fi
 
       - name: Print calibration report
+        env:
+          SUPABASE_URL:      https://gggozciyvjeqjnmufigp.supabase.co
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: python3 calibration_tracker.py report
 
       - name: Save calibration log

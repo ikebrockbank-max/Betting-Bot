@@ -7,8 +7,10 @@ on:
     - cron: '0 18 * * *'   # 2 PM ET  — afternoon updates
     - cron: '0 22 * * *'   # 6 PM ET  — pre-game prime time
     - cron: '0 2  * * *'   # 10 PM ET — late games / next day lines
-    # Results update: 9 AM ET every day — resolves yesterday's picks in Supabase
-    - cron: '0 13 * * *'   # 9 AM ET  — fetch yesterday's box scores, mark hit/miss
+    # NOTE: results resolution lives in resolve_results.yml (10 AM PT), not here.
+    # A 5th cron entry here ('0 13 * * *') was added previously but never fired in
+    # 10+ days of history — GitHub silently dropped/never triggered it. Removed
+    # 2026-06-16 to stop relying on a schedule trigger that doesn't work.
   workflow_dispatch:
     inputs:
       sports:
@@ -38,11 +40,11 @@ jobs:
   power-parlay:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # Run on all schedules except the 9 AM results run, and on manual dispatch
-    # unless the user explicitly requested the results updater.
+    # Run on all schedules, and on manual dispatch unless the user explicitly
+    # requested the (now-removed) results updater.
     if: >
       (github.event_name == 'workflow_dispatch' && github.event.inputs.update_results != 'true') ||
-      (github.event_name == 'schedule' && github.event.schedule != '0 13 * * *')
+      github.event_name == 'schedule'
 
     steps:
       - uses: actions/checkout@v4
@@ -97,10 +99,8 @@ jobs:
   update-results:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Runs on the 9 AM cron, or when manually dispatched with update_results=true
-    if: >
-      github.event.schedule == '0 13 * * *' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.update_results == 'true')
+    # Manual-only fallback now — the scheduled path lives in resolve_results.yml.
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.update_results == 'true'
 
     steps:
       - uses: actions/checkout@v4
