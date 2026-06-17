@@ -308,6 +308,46 @@ def analyze(days_back: int | None = 30):
         flag = "✅" if rate >= 0.60 else ("⚠️" if rate >= 0.55 else "❌")
         print(f"  {flag} {st:<26} {sport:<6} {rate:.0%}                {n}")
 
+    # ── 9d. HFS — pitcher tier & park factor cross-tabs ─────────────────────
+    section("9d. HFS — pitcher tier & park factor breakdown")
+    hfs_bet = [p for p in bet if p.get("stat_type") == "Hitter Fantasy Score"]
+
+    # Pitcher tier
+    print("  Pitcher tier:")
+    tier_order = ["elite_ace", "ace", "good", "average", "weak", "unknown", ""]
+    tier_groups = defaultdict(lambda: {"hits": 0, "total": 0})
+    for p in hfs_bet:
+        tier = (p.get("pitcher_tier") or "unknown").lower().strip()
+        tier_groups[tier]["hits"] += 1 if p.get("result") == "hit" else 0
+        tier_groups[tier]["total"] += 1
+    for tier in tier_order:
+        d = tier_groups.get(tier)
+        if d and d["total"] >= 3:
+            rate = d["hits"] / d["total"]
+            label = tier if tier else "none"
+            flag = "✅" if rate >= 0.60 else ("⚠️" if rate >= 0.52 else "❌")
+            print(f"    {flag} {label:<14} {pct(d['hits'], d['total']):<20} {bar(rate)}  n={d['total']}")
+    for tier, d in tier_groups.items():
+        if tier not in tier_order and d["total"] >= 3:
+            rate = d["hits"] / d["total"]
+            flag = "✅" if rate >= 0.60 else ("⚠️" if rate >= 0.52 else "❌")
+            print(f"    {flag} {tier:<14} {pct(d['hits'], d['total']):<20} {bar(rate)}  n={d['total']}")
+
+    # Park factor
+    print("\n  Park factor (1.0 = neutral, >1.05 = hitter park, <0.95 = pitcher park):")
+    pf_buckets = [("<0.95 pitcher park", lambda v: v < 0.95),
+                  ("0.95-1.05 neutral",  lambda v: 0.95 <= v <= 1.05),
+                  (">1.05 hitter park",  lambda v: v > 1.05),
+                  ("missing",            lambda v: v is None)]
+    for label, fn in pf_buckets:
+        grp = [p for p in hfs_bet if fn(p.get("park_factor"))]
+        if len(grp) < 3:
+            continue
+        h = sum(1 for p in grp if p.get("result") == "hit")
+        rate = h / len(grp)
+        flag = "✅" if rate >= 0.60 else ("⚠️" if rate >= 0.52 else "❌")
+        print(f"    {flag} {label:<22} {pct(h, len(grp)):<20} {bar(rate)}  n={len(grp)}")
+
     # ── 10. Worst individual picks by miss margin ────────────────────────
     section("10. Biggest misses — where did the model go most wrong?")
     print("  (picks where model was most confident but missed)")
