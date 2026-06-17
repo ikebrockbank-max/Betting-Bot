@@ -39,7 +39,7 @@ env:
 jobs:
   power-parlay:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     # Run on all schedules, and on manual dispatch unless the user explicitly
     # requested the (now-removed) results updater.
     if: >

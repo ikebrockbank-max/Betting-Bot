@@ -556,42 +556,44 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
                 pass
 
     # ── H2H and Statcast advanced stats ──────────────────────────────────────
+    # Skip H2H entirely if raw avg is within 8% of line — these picks won't
+    # qualify anyway and H2H fetches are expensive (live API calls per player).
+    _raw_edge = abs(avg_n - line) / (line + 1e-9) if line else 0
     h2h_data     = None
     vs_team_data = None
     statcast     = {}
     pitcher_vs_team_data = None
     h2h_conf_adj = 0.0
 
-    try:
-        from data.mlb_h2h import (get_batter_vs_pitcher, get_batter_vs_team,
-                                   get_pitcher_vs_team, get_batter_statcast,
-                                   get_pitcher_statcast, h2h_confidence_adjustment)
+    if _raw_edge >= 0.08:
+        try:
+            from data.mlb_h2h import (get_batter_vs_pitcher, get_batter_vs_team,
+                                       get_pitcher_vs_team, get_batter_statcast,
+                                       get_pitcher_statcast, h2h_confidence_adjustment)
 
-        player_pid = find_player_id(player_name)
-        if player_pid:
-            pid_int = int(player_pid)
-            opp_team_name = ctx.get("opp_team", "")
-            opp_pitcher   = ctx.get("opp_pitcher", "")
-            opp_pitcher_id = game.get("opp_pitcher_id") if game else None
+            player_pid = find_player_id(player_name)
+            if player_pid:
+                pid_int = int(player_pid)
+                opp_pitcher_id = game.get("opp_pitcher_id") if game else None
 
-            if not is_pitcher:
-                # Batter: get H2H vs today's pitcher + vs team + Statcast
-                if opp_pitcher_id:
-                    h2h_data = get_batter_vs_pitcher(pid_int, opp_pitcher_id)
-                opp_id_for_h2h = game.get("opp_id") if game else None
-                if opp_id_for_h2h and not h2h_data:
-                    vs_team_data = get_batter_vs_team(pid_int, opp_id_for_h2h)
-                statcast = get_batter_statcast(pid_int)
-                h2h_conf_adj = h2h_confidence_adjustment(h2h_data, vs_team_data,
-                                                          direction, stat_type)
-            else:
-                # Pitcher: get pitcher vs today's team + pitcher Statcast
-                opp_id_for_h2h = game.get("opp_id") if game else None
-                if opp_id_for_h2h:
-                    pitcher_vs_team_data = get_pitcher_vs_team(pid_int, opp_id_for_h2h)
-                statcast = get_pitcher_statcast(pid_int)
-    except Exception:
-        pass
+                if not is_pitcher:
+                    # Batter: get H2H vs today's pitcher + vs team + Statcast
+                    if opp_pitcher_id:
+                        h2h_data = get_batter_vs_pitcher(pid_int, opp_pitcher_id)
+                    opp_id_for_h2h = game.get("opp_id") if game else None
+                    if opp_id_for_h2h and not h2h_data:
+                        vs_team_data = get_batter_vs_team(pid_int, opp_id_for_h2h)
+                    statcast = get_batter_statcast(pid_int)
+                    h2h_conf_adj = h2h_confidence_adjustment(h2h_data, vs_team_data,
+                                                              direction, stat_type)
+                else:
+                    # Pitcher: get pitcher vs today's team + pitcher Statcast
+                    opp_id_for_h2h = game.get("opp_id") if game else None
+                    if opp_id_for_h2h:
+                        pitcher_vs_team_data = get_pitcher_vs_team(pid_int, opp_id_for_h2h)
+                    statcast = get_pitcher_statcast(pid_int)
+        except Exception:
+            pass
 
     return {
         "player":          player_name,
