@@ -271,6 +271,43 @@ def analyze(days_back: int | None = 30):
         flag = "✅" if gap > -0.05 else ("⚠️" if gap > -0.10 else "❌ BAD SIGNAL")
         print(f"  HR {lo:.0%}-{hi:.0%}:  actual {rate:.0%}  (n={len(b)})  {gap:+.0%}  {flag}")
 
+    # ── 9b. HFS × Confidence cross-tab ───────────────────────────────────────
+    section("9b. Hitter Fantasy Score — hit rate by confidence bucket")
+    hfs_picks = [p for p in bet if p.get("stat_type") == "Hitter Fantasy Score"]
+    print(f"  Total HFS bet picks: {len(hfs_picks)}  overall: {pct(sum(1 for p in hfs_picks if p.get('result')=='hit'), len(hfs_picks))}")
+    print(f"  {'Bucket':<10} {'Hit rate':<20} {'N'}")
+    print(f"  {'-'*40}")
+    for lo, hi in [(70,75),(75,80),(80,85),(85,100)]:
+        b = [p for p in hfs_picks if lo <= (p.get("conf_pct") or 0) < hi]
+        if len(b) < 3: continue
+        h = sum(1 for p in b if p.get("result") == "hit")
+        rate = h / len(b)
+        print(f"  {lo}-{hi}%    {pct(h,len(b)):<20} {bar(rate)}")
+    for d in ["OVER", "UNDER"]:
+        db = [p for p in hfs_picks if p.get("direction") == d]
+        if len(db) < 3: continue
+        h = sum(1 for p in db if p.get("result") == "hit")
+        rate = h / len(db)
+        print(f"  HFS {d}: {pct(h,len(db))}  {bar(rate)}")
+
+    # ── 9c. All stat types at 75%+ confidence — ranked ───────────────────────
+    section("9c. All stat types × high confidence (75%+) — ranked")
+    high_conf = [p for p in bet if (p.get("conf_pct") or 0) >= 75]
+    by_stat_hc = defaultdict(lambda: {"hits": 0, "total": 0, "sport": ""})
+    for p in high_conf:
+        st = p.get("stat_type", "?")
+        by_stat_hc[st]["hits"] += (1 if p.get("result") == "hit" else 0)
+        by_stat_hc[st]["total"] += 1
+        by_stat_hc[st]["sport"] = p.get("sport", "")
+    ranked_hc = [(st, d["hits"]/d["total"], d["total"], d["sport"])
+                 for st, d in by_stat_hc.items() if d["total"] >= 5]
+    ranked_hc.sort(key=lambda x: -x[1])
+    print(f"  {'Stat type':<28} {'Sport':<6} {'Hit rate (75%+)':<18} {'N'}")
+    print(f"  {'-'*60}")
+    for st, rate, n, sport in ranked_hc:
+        flag = "✅" if rate >= 0.60 else ("⚠️" if rate >= 0.55 else "❌")
+        print(f"  {flag} {st:<26} {sport:<6} {rate:.0%}                {n}")
+
     # ── 10. Worst individual picks by miss margin ────────────────────────
     section("10. Biggest misses — where did the model go most wrong?")
     print("  (picks where model was most confident but missed)")
