@@ -335,9 +335,9 @@ def analyze(days_back: int | None = 30):
 
     # Park factor
     print("\n  Park factor (1.0 = neutral, >1.05 = hitter park, <0.95 = pitcher park):")
-    pf_buckets = [("<0.95 pitcher park", lambda v: v < 0.95),
-                  ("0.95-1.05 neutral",  lambda v: 0.95 <= v <= 1.05),
-                  (">1.05 hitter park",  lambda v: v > 1.05),
+    pf_buckets = [("<0.95 pitcher park", lambda v: v is not None and v < 0.95),
+                  ("0.95-1.05 neutral",  lambda v: v is not None and 0.95 <= v <= 1.05),
+                  (">1.05 hitter park",  lambda v: v is not None and v > 1.05),
                   ("missing",            lambda v: v is None)]
     for label, fn in pf_buckets:
         grp = [p for p in hfs_bet if fn(p.get("park_factor"))]
