@@ -262,7 +262,7 @@ MIN_GAMES = {
     "Hitter Fantasy Score": 10,   # more games needed for stable FS average
     "Hits+Runs+RBIs": 10,
     "Singles": 10,
-    "default": 8,
+    "default": 10,  # raised from 8 — calibration shows 8-game samples too noisy
 }
 
 def _get_pitcher_hand(pitcher_name: str) -> str:
@@ -410,7 +410,7 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
     if len(values) < min_g:
         return None
 
-    n      = min(len(values), 15)
+    n      = min(len(values), 10)  # tightened from 15 — more recent = more predictive
     recent = [v for v, _ in values[:n]]
     l3     = recent[:3]
     l5     = recent[:5]
@@ -430,6 +430,14 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
     else:
         direction = "OVER" if avg_n > line else "UNDER"
     hit_rate  = (over_hits / n) if direction == "OVER" else (under_hits / n)
+
+    # Bayesian-adjusted hit rate: shrinks small-sample extremes toward 0.50.
+    # Prior = 8 ghost games at 50% (4 hits, 4 misses). This prevents the model
+    # from treating 9/10 (90%) the same as a true 90% performer.
+    # 8/10 → adj 66.7% (barely passes 67% floor), 10/10 → adj 77.8%.
+    _bayes_prior = 8
+    _adj_hits = over_hits if direction == "OVER" else under_hits
+    adj_hit_rate = round((_adj_hits + _bayes_prior * 0.5) / (n + _bayes_prior), 3)
 
     # Trend: L3 vs full window (for batters, this is noisier)
     trend = (avg_l3 - avg_n) / (avg_n + 1e-9)
@@ -594,6 +602,7 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
         "avg_l3":          round(avg_l3, 2),
         "avg_l5":          round(avg_l5, 2),
         "hit_rate":        round(hit_rate, 3),
+        "adj_hit_rate":    adj_hit_rate,   # Bayesian-shrunk hit rate (used by model cap)
         "hit_rate_over":   round(over_hits / n, 3),
         "hit_rate_under":  round(under_hits / n, 3),
         "location_hit_rate": round(loc_hit_rate, 3),

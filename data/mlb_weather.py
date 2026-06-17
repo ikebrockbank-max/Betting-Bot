@@ -216,18 +216,42 @@ def _save_cache(data: dict):
     CACHE_PATH.write_text(json.dumps(data))
 
 
+def _fetch_open_meteo(lat: float, lon: float) -> dict | None:
+    """
+    Fetch current weather from Open-Meteo — free, no API key required.
+    Returns raw weather dict or None on failure.
+    """
+    try:
+        url = (f"https://api.open-meteo.com/v1/forecast"
+               f"?latitude={lat}&longitude={lon}"
+               f"&current=temperature_2m,wind_speed_10m,wind_direction_10m,weather_code"
+               f"&wind_speed_unit=mph&temperature_unit=fahrenheit&forecast_days=1")
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data    = resp.json()
+        current = data.get("current", {})
+        return {
+            "temp_f":       current.get("temperature_2m", 72),
+            "wind_mph":     current.get("wind_speed_10m", 0),
+            "wind_dir_deg": current.get("wind_direction_10m", 0),
+            "condition":    str(current.get("weather_code", 0)),
+        }
+    except Exception:
+        return None
+
+
 def get_park_weather(home_team_name: str) -> dict | None:
     """
     Fetch current weather at the home team's ballpark.
 
+    Uses Open-Meteo (no API key) as primary source;
+    falls back to OpenWeatherMap if OPENWEATHER_API_KEY is set.
+
     Returns:
       {temp_f, wind_mph, wind_dir_deg, wind_dir_label, condition,
-       over_boost, description}
-    Returns None if OPENWEATHER_API_KEY not set, team not found, or API error.
+       over_boost, description, is_dome}
+    Returns None if team not found or all APIs fail.
     """
-    if not OPENWEATHER_API_KEY:
-        return None
-
     # Match team name to park entry (last word, case-insensitive)
     team_key = home_team_name.strip().lower().split()[-1] if home_team_name.strip() else ""
 
@@ -251,32 +275,45 @@ def get_park_weather(home_team_name: str) -> dict | None:
     if park is None:
         return None
 
+    # Dome parks — weather doesn't matter
+    DOME_KEYS = {"rays", "blue jays", "astros", "rangers", "marlins", "diamondbacks"}
+    is_dome = any(d in matched_key for d in DOME_KEYS)
+
     # Check cache (keyed per park per hour)
-    hour_key  = f"{matched_key}_{int(time.time() // CACHE_TTL)}"
-    cache     = _load_cache()
+    hour_key = f"{matched_key}_{int(time.time() // CACHE_TTL)}"
+    cache    = _load_cache()
     if hour_key in cache:
         return cache[hour_key]
 
-    try:
-        resp = requests.get(
-            "https://api.openweathermap.org/data/2.5/weather",
-            params={
-                "lat":   park["lat"],
-                "lon":   park["lon"],
-                "appid": OPENWEATHER_API_KEY,
-                "units": "imperial",
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        w = resp.json()
-    except Exception:
+    # Try Open-Meteo first (no API key), then OpenWeatherMap as fallback
+    raw = _fetch_open_meteo(park["lat"], park["lon"])
+
+    if raw is None and OPENWEATHER_API_KEY:
+        try:
+            resp = requests.get(
+                "https://api.openweathermap.org/data/2.5/weather",
+                params={"lat": park["lat"], "lon": park["lon"],
+                        "appid": OPENWEATHER_API_KEY, "units": "imperial"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            w = resp.json()
+            raw = {
+                "temp_f":       w.get("main", {}).get("temp", 72),
+                "wind_mph":     w.get("wind", {}).get("speed", 0),
+                "wind_dir_deg": w.get("wind", {}).get("deg", 0),
+                "condition":    w.get("weather", [{}])[0].get("description", ""),
+            }
+        except Exception:
+            pass
+
+    if raw is None:
         return None
 
-    temp_f       = w.get("main", {}).get("temp", 72)
-    wind_mph     = w.get("wind", {}).get("speed", 0)
-    wind_dir_deg = w.get("wind", {}).get("deg", 0)
-    condition    = w.get("weather", [{}])[0].get("description", "")
+    temp_f       = raw["temp_f"]
+    wind_mph     = raw["wind_mph"]
+    wind_dir_deg = raw["wind_dir_deg"]
+    condition    = raw["condition"]
 
     # Compute wind component toward outfield
     orientation_deg = park.get("orientation_deg", 0)
@@ -324,8 +361,9 @@ def get_park_weather(home_team_name: str) -> dict | None:
         "wind_dir_label": wind_dir_label,
         "wind_component": round(wind_component, 1),
         "condition":      condition,
-        "over_boost":     round(over_boost, 3),
-        "description":    description,
+        "over_boost":     round(over_boost, 3) if not is_dome else 0.0,
+        "description":    description if not is_dome else "Dome — weather N/A",
+        "is_dome":        is_dome,
         "park":           matched_key,
         "city":           park.get("city", ""),
     }
