@@ -27,10 +27,13 @@ on:
         default: 'false'
 
 # Shared env block — all jobs inherit these secrets
+# NTFY_TOPIC intentionally omitted: scanner_power_parlay.py's run() sends its
+# own parlay push separate from daily_top_picks.py's single-pick notification.
+# Without NTFY_TOPIC, send_push() is a clean no-op — Supabase logging and
+# calibration (the actual point of this workflow) are unaffected.
 env:
   SUPABASE_URL:      https://gggozciyvjeqjnmufigp.supabase.co
   SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-  NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
   ODDS_API_KEY:      ${{ secrets.ODDS_API_KEY }}
   OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
   DISCORD_WEBHOOK_PREMIUM: ${{ secrets.DISCORD_WEBHOOK_PREMIUM }}

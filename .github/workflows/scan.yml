@@ -26,12 +26,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # NTFY_TOPIC intentionally omitted from this step — auto_scan.py (bug/flash
+      # sale/consensus-edge alerts) should not push to the same phone topic as
+      # the daily top picks. send_push() is a clean no-op without NTFY_TOPIC.
       - name: Run PrizePicks scanner
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           DISCORD_WEBHOOK_PREMIUM: ${{ secrets.DISCORD_WEBHOOK_PREMIUM }}
           DISCORD_WEBHOOK_FREE: ${{ secrets.DISCORD_WEBHOOK_FREE }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
@@ -47,32 +49,19 @@ jobs:
           path: logs/
           key: scanner-state-${{ github.run_id }}
 
-      - name: Daily top 6 picks (1 PM ET = 17 UTC) — replaces old digest push
-        env:
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-          DISCORD_WEBHOOK_PREMIUM: ${{ secrets.DISCORD_WEBHOOK_PREMIUM }}
-          DISCORD_WEBHOOK_FREE: ${{ secrets.DISCORD_WEBHOOK_FREE }}
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
-          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
-          KALSHI_PRIVATE_KEY_BASE64: ${{ secrets.KALSHI_PRIVATE_KEY_BASE64 }}
-        run: |
-          HOUR=$(date -u +%H | sed 's/^0//')
-          if [ "$HOUR" -ge 17 ] && [ "$HOUR" -le 18 ]; then
-            python3 daily_top_picks.py
-          else
-            echo "Outside 1-2 PM ET window — skipping daily picks this run"
-          fi
+      # Removed: this duplicated daily_top_picks.yml, which already runs
+      # daily_top_picks.py once cleanly at 18:00 UTC. Because this step ran on
+      # every 15-minute tick within the 17:00-18:59 UTC window with no dedup
+      # logic in daily_top_picks.py, it could fire the same notification up
+      # to 8 extra times a day on top of the dedicated workflow's single send.
 
+      # NTFY_TOPIC intentionally omitted — pp_playoff_report.py's pre-game
+      # report is a separate alert type from the daily top picks push.
       - name: Run pre-game parlay report
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           DISCORD_WEBHOOK_PREMIUM: ${{ secrets.DISCORD_WEBHOOK_PREMIUM }}
           DISCORD_WEBHOOK_FREE: ${{ secrets.DISCORD_WEBHOOK_FREE }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
