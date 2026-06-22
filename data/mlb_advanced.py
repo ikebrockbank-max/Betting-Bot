@@ -477,7 +477,10 @@ def get_mlb_odds(date_str: str = None) -> list[dict]:
     """
     global _ODDS_CACHE, _ODDS_TS
     now = time.time()
-    if _ODDS_CACHE and (now - _ODDS_TS) < _TTL["odds"]:
+    # Cache hit covers both successful results AND a known-failed key/outage —
+    # _ODDS_CACHE == [] from a prior failure still satisfies the TTL window
+    # below since we check timestamp freshness, not truthiness, first.
+    if (now - _ODDS_TS) < _TTL["odds"] and _ODDS_CACHE is not None:
         return _ODDS_CACHE
 
     api_key = os.getenv("ODDS_API_KEY", "")
@@ -511,6 +514,12 @@ def get_mlb_odds(date_str: str = None) -> list[dict]:
         return games
     except Exception as e:
         print(f"[mlb_advanced] Odds API failed: {e}")
+        # Cache the failure too — with a dead/expired key this was retrying
+        # the network call on every single pick scored (confirmed: 30+
+        # identical "401 Unauthorized" lines in one run), adding real latency
+        # across hundreds of picks instead of failing once per TTL window.
+        _ODDS_CACHE = []
+        _ODDS_TS    = now
         return []
 
 def get_game_total(home_team: str, away_team: str) -> float | None:
