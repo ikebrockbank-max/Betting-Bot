@@ -28,12 +28,40 @@ def _log(msg):
     print(f"[daily_picks {datetime.now(timezone.utc).strftime('%H:%M')}] {msg}", flush=True)
 
 
+# MLB rank weights, layered on top of the canonical direction/stat-type gate
+# below (parlay_builder._passes_direction_gate). That gate already removes the
+# confirmed-bad stat types and the UNDER bias; this just orders what's left
+# toward the categories with the best track record (14-day review, 2026-06-18).
+def _mlb_trust_score(p: dict) -> float:
+    stat = p.get("stat_type")
+    conf = p.get("confidence", 0)
+    if stat == "Runs":
+        return 0.58          # flat ~56-58% across every confidence level (n=66)
+    if stat == "Walks":
+        return 0.62          # 64.3% overall, but small sample (n=14)
+    if stat == "Hitter Fantasy Score":
+        if 0.75 <= conf < 0.80:
+            return 0.622     # best volume/performance combo (n=74, 62.2%)
+        if conf >= 0.80:
+            return 0.60      # n=10, slightly below the 0.75-0.80 band
+        if conf >= 0.70:
+            return 0.52      # n=100, barely above coinflip
+        return 0.50          # n=36, coinflip
+    return conf
+
+
 def get_top_picks(sports: list[str], n: int = 6) -> dict[str, list[dict]]:
     """
     Run the scanner for each sport and return top N picks per sport.
     Returns {sport: [pick_dict, ...]}
     """
     import scanner_power_parlay as s
+    # This is the same direction/stat-type gate parlays already use (blocks
+    # EXCLUDED_STAT_TYPES like Singles/Hits Allowed/Pitcher Strikeouts, and
+    # blocks UNDER outside UNDER_EXCEPTIONS — confirmed UNDER 47% vs OVER 56%,
+    # n=706 — see parlay_builder.py). The single-pick ntfy push never applied
+    # it before, so it was pushing picks the parlay builder itself would reject.
+    from parlay_builder import _passes_direction_gate
 
     results = {}
     for sport in sports:
@@ -53,12 +81,23 @@ def get_top_picks(sports: list[str], n: int = 6) -> dict[str, list[dict]]:
                 result = s.score_pick(stats, pick)
                 if result.get("skip_reason"):
                     continue
-                if result.get("confidence", 0) < 0.62:
+                # Matches MIN_CONF_PARLAY in parlay_builder.py. Their signal_miner
+                # data (728 picks, 2026-06-15) confirmed 65-70% confidence is a
+                # negative-EV dead zone (47% actual) and 70-75% is barely above
+                # baseline (53%). 75%+ is the only bucket with real significance
+                # (61.2% actual, z=2.0). No reason the single-pick push should
+                # tolerate a range the parlay builder itself rejects.
+                if result.get("confidence", 0) < 0.75:
+                    continue
+                if not _passes_direction_gate(result):
                     continue
                 scored.append(result)
                 time.sleep(0.02)
 
-            scored.sort(key=lambda x: x["confidence"], reverse=True)
+            if sport == "MLB":
+                scored.sort(key=_mlb_trust_score, reverse=True)
+            else:
+                scored.sort(key=lambda x: x["confidence"], reverse=True)
 
             # Deduplicate by player — keep best pick per player
             seen_players = set()

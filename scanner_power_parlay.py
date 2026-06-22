@@ -2427,8 +2427,19 @@ def run(sports: list[str] = None, force: bool = False):
     #             Logged to Supabase so we can validate whether model confidence
     #             actually predicts hit rate across the full spectrum (30%–90%).
     # scored:     only picks above MIN_CONF — used for parlay building / notifications.
+    #
+    # Logging happens INSIDE this loop (not after it finishes) so that a run
+    # killed mid-scan by the GitHub Actions timeout still persists whatever
+    # was already scored, instead of losing the entire run. This was a real
+    # bug: power_parlay.yml has timeout-minutes: 15, and from 2026-06-17 most
+    # scheduled runs started taking >15 min and got cancelled — losing 100%
+    # of that run's picks because logging used to happen only after the full
+    # loop completed.
+    from calibration_tracker import log_pick as _log_pick_early
     scored_all = []
     scored     = []
+    _logged_q  = 0
+    _logged_w  = 0
     for i, pick in enumerate(all_lines):
         stats = get_stats_for_pick(pick)
         if stats is None:
@@ -2441,34 +2452,22 @@ def run(sports: list[str] = None, force: bool = False):
         scored_all.append(s)
         if s["was_qualified"]:
             scored.append(s)
+        try:
+            _log_pick_early(s)
+            if s["was_qualified"]:
+                _logged_q += 1
+            else:
+                _logged_w += 1
+        except Exception:
+            pass
         # Progress log every 20 picks
         if (i + 1) % 20 == 0:
             _log(f"  Scored {i+1}/{len(all_lines)} lines, {len(scored)} qualified so far...")
         time.sleep(0.05)  # light rate-limit respect
 
     _log(f"All scored: {len(scored_all)} | Qualified (≥{int(MIN_CONF*100)}%): {len(scored)}")
-
-    # Log ALL scored picks to Supabase NOW — before any early returns.
-    # This ensures watched picks are always captured for calibration,
-    # even on days with zero qualified picks or all-deduped runs.
-    try:
-        from calibration_tracker import log_pick as _log_pick_early
-        today = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%d")
-        _early_logged_q = 0
-        _early_logged_w = 0
-        for p in scored_all:
-            try:
-                _log_pick_early(p)
-                if p.get("was_qualified"):
-                    _early_logged_q += 1
-                else:
-                    _early_logged_w += 1
-            except Exception:
-                pass
-        if _early_logged_q or _early_logged_w:
-            _log(f"Logged {_early_logged_q} bet picks + {_early_logged_w} watched picks to Supabase.")
-    except Exception:
-        pass
+    if _logged_q or _logged_w:
+        _log(f"Logged {_logged_q} bet picks + {_logged_w} watched picks to Supabase.")
 
     if not scored:
         _log("No qualified picks — nothing to send")

@@ -39,7 +39,10 @@ env:
 jobs:
   power-parlay:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Raised from 15 — since 2026-06-17 most runs needed 15-30 min to score a
+    # full slate and were getting cancelled at the 15-min mark, losing the
+    # entire run's picks. 30 min covers the slowest observed run (~27m25s).
+    timeout-minutes: 30
     # Run on all schedules, and on manual dispatch unless the user explicitly
     # requested the (now-removed) results updater.
     if: >
