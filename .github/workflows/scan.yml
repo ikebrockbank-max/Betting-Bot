@@ -26,14 +26,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # NTFY_TOPIC intentionally omitted from this step — auto_scan.py (bug/flash
-      # sale/consensus-edge alerts) should not push to the same phone topic as
-      # the daily top picks. send_push() is a clean no-op without NTFY_TOPIC.
+      # NTFY_TOPIC restored for this step — user wants bug/flash-sale/
+      # consensus-edge alerts from auto_scan.py on the same topic after all.
       - name: Run PrizePicks scanner
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           DISCORD_WEBHOOK_PREMIUM: ${{ secrets.DISCORD_WEBHOOK_PREMIUM }}
           DISCORD_WEBHOOK_FREE: ${{ secrets.DISCORD_WEBHOOK_FREE }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
