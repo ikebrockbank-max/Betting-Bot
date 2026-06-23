@@ -39,12 +39,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # NTFY_TOPIC intentionally omitted — calibration_tracker.py sends its own
-      # results/P&L recap push, separate from the daily top picks notification.
+      # NTFY_TOPIC restored — user wants the daily results/P&L recap pushed too.
       - name: Resolve results
         env:
           SUPABASE_URL:      https://gggozciyvjeqjnmufigp.supabase.co
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
           ODDS_API_KEY:      ${{ secrets.ODDS_API_KEY }}
         run: |
           DATE="${{ github.event.inputs.date }}"
