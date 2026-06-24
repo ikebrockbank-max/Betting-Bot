@@ -829,13 +829,22 @@ def _fetch_actual_wnba(player: str, stat_type: str, target_date: str):
         aid        = _find_athlete_id(player, players)
         if not aid:
             return None
+        found_any_games = False
         for season in [CURRENT_SEASON, PRIOR_SEASON]:
             ev_flat, labels, ev_meta = _fetch_gamelog_raw(aid, season)
             if not ev_flat:
                 continue
-            for g in _build_game_log(ev_flat, labels, ev_meta, fetch_cols):
+            game_log = _build_game_log(ev_flat, labels, ev_meta, fetch_cols)
+            if game_log:
+                found_any_games = True
+            for g in game_log:
                 if g.get("date") == target_date:
                     return g["value"]
+        # Same DNP logic as MLB: a season log exists but no entry for this
+        # date means a confirmed scratch/no-play day, not a transient
+        # fetch failure — resolve as void instead of retrying forever.
+        if found_any_games:
+            return "DNP"
         return None
     except Exception:
         return None
@@ -862,6 +871,11 @@ def _fetch_actual_nba(player: str, stat_type: str, target_date: str):
         for g in games:
             if g.get("date", "")[:10] == target_date:
                 return val(g)
+        # Same DNP logic as MLB/WNBA: a game log exists but no entry for
+        # this date means a confirmed scratch/no-play day — resolve as
+        # void instead of retrying forever.
+        if games:
+            return "DNP"
         return None
     except Exception:
         return None
