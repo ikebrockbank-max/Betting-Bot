@@ -9,6 +9,10 @@ on:
         description: 'Force resend even if picks were recently sent'
         required: false
         default: 'false'
+      sports:
+        description: 'Comma-separated sports to scope to (e.g. MLB). Blank = all three.'
+        required: false
+        default: ''
 
 jobs:
   daily-picks:
@@ -44,7 +48,7 @@ jobs:
           KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
           KALSHI_PRIVATE_KEY_BASE64: ${{ secrets.KALSHI_PRIVATE_KEY_BASE64 }}
         run: |
-          python3 daily_top_picks.py
+          python3 daily_top_picks.py "${{ github.event.inputs.sports }}"
 
       - name: Save state cache
         if: always()

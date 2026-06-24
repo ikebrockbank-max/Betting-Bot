@@ -548,11 +548,13 @@ def send_notifications(picks_by_sport: dict[str, list]):
         threading.Thread(target=_delayed, daemon=True).start()
 
 
-def run():
+def run(sports: list[str] | None = None):
     _log("Starting daily top picks generation...")
 
-    # Determine which sports have games today
-    sports_to_scan = ["MLB", "NBA", "WNBA"]
+    # Allows isolating a single sport for diagnosis (e.g. one scan hanging
+    # near the timeout) without scanning the others. Defaults to all three.
+    sports_to_scan = sports or ["MLB", "NBA", "WNBA"]
+    _log(f"Scoping to: {', '.join(sports_to_scan)}")
 
     picks_by_sport = get_top_picks(sports_to_scan, n=6)
 
@@ -578,4 +580,8 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    # python3 daily_top_picks.py MLB         -> single sport
+    # python3 daily_top_picks.py MLB,WNBA    -> subset
+    # python3 daily_top_picks.py             -> all three (default)
+    _arg = sys.argv[1] if len(sys.argv) > 1 else None
+    run(sports=[s.strip() for s in _arg.split(",")] if _arg else None)
