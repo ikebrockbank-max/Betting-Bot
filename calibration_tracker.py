@@ -382,15 +382,23 @@ def update_stat_calibration():
     if not resolved:
         return
 
-    # Group by sport + stat_type
+    # Group by sport + stat_type. Exclude confidence==0 — those are picks
+    # score_pick() hard-gated out (edge too small, DNP risk, unconfirmed
+    # lineup, etc), never real candidates. For some stat types they're the
+    # vast majority of resolved rows (Pitches Thrown: 149/157, 95%) and were
+    # dragging avg_confidence toward 0 while polluting real_hit_rate with
+    # outcomes from picks the model never actually endorsed.
     by_stat: dict[tuple, dict] = {}
     for r in resolved:
         key = (r.get("sport", ""), r.get("stat_type", ""))
         if not all(key):
             continue
+        conf = float(r.get("confidence") or 0)
+        if conf <= 0:
+            continue
         by_stat.setdefault(key, {"hits": 0, "total": 0, "conf_sum": 0.0})
         by_stat[key]["total"] += 1
-        by_stat[key]["conf_sum"] += float(r.get("confidence") or 0)
+        by_stat[key]["conf_sum"] += conf
         if r.get("result") == "hit":
             by_stat[key]["hits"] += 1
 
