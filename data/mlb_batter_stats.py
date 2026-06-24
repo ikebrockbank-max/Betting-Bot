@@ -89,18 +89,24 @@ def compute_hitter_fs(s: dict) -> float:
 
 def compute_pitcher_fs(s: dict) -> float:
     """
-    PrizePicks MLB Pitcher Fantasy Score.
-    Reverse-engineered from user-verified data:
-      Jeffrey Springs last 5: K×3 + IP×3.5 - ER×3 → [32.5, 18.35, 27.0, 20.5, 23.85]
-      → exactly 2/5 OVER 24.5 (matches PrizePicks app).
+    PrizePicks MLB Pitcher Fantasy Score — official formula, verified against
+    Kyle Freeland's 2026-06-19 start (22 outs, 8K, 2ER, no decision):
+      22×1 + 8×3 - 2×3 + 4 (quality start: outs>=18 and ER<=3) = 44, exact match.
+    Three earlier versions of this formula existed across the codebase
+    (this file, calibration_tracker.py, a stale docstring elsewhere) — all
+    different, all wrong (wrong weights, missing the quality-start bonus,
+    wrongly penalizing hits/walks/HBP which PrizePicks doesn't penalize at
+    all). This is the only one now; calibration_tracker.py's resolver was
+    fixed to match.
 
-    Formula: K×3 + IP×3.5 - ER×3
-    Note: IP uses raw float (e.g. '5.1' = 5.1, not 5.333) matching PP's own calculation.
+    Outs×1 + K×3 - ER×3 + QualityStart×4 + Win×6. No H/BB/HBP penalty.
     """
-    ks = int(s.get("strikeOuts", 0) or 0)
-    ip = float(s.get("inningsPitched", 0) or 0)   # raw float, not baseball conversion
-    er = int(s.get("earnedRuns", 0) or 0)
-    return ks * 3 + ip * 3.5 - er * 3
+    outs = int(s.get("outs", 0) or 0)
+    ks   = int(s.get("strikeOuts", 0) or 0)
+    er   = int(s.get("earnedRuns", 0) or 0)
+    win  = int(s.get("wins", 0) or 0) > 0
+    qs   = outs >= 18 and er <= 3
+    return outs * 1.0 + ks * 3.0 - er * 3.0 + (4.0 if qs else 0.0) + (6.0 if win else 0.0)
 
 
 # ── Stat type → group + compute function ──────────────────────────────────────

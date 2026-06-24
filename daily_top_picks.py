@@ -35,9 +35,15 @@ def _log(msg):
 def _mlb_trust_score(p: dict) -> float:
     stat = p.get("stat_type")
     conf = p.get("confidence", 0)
-    if stat == "Pitcher Fantasy Score" and p.get("direction") == "UNDER":
-        return 0.92           # 92.3% isolated (36/39, 90-day) — strongest signal
-                              # in the system; unlocked at 0.60+ instead of 0.75
+    # Pitcher Fantasy Score UNDER unlock REVERTED (2026-06-24): the "92.3%"
+    # finding was computed against a broken scoring formula across the whole
+    # codebase (wrong weights, missing the quality-start bonus, wrongly
+    # penalizing hits/walks/HBP that PrizePicks doesn't penalize at all).
+    # Caught live when the user checked Kyle Freeland's actual PrizePicks
+    # app score (44) against what this system computed (26.1). Formula fixed
+    # in calibration_tracker.py and data/mlb_batter_stats.py; recomputing all
+    # 192 historical picks with the correct formula shows UNDER at 46.3%
+    # (56/121) — a coinflip, not an edge. No replacement signal yet.
     if stat == "Runs":
         return 0.58          # flat ~56-58% across every confidence level (n=66)
     if stat == "Walks":
@@ -91,18 +97,10 @@ def get_top_picks(sports: list[str], n: int = 6) -> dict[str, list[dict]]:
                 # (61.2% actual, z=2.0). No reason the single-pick push should
                 # tolerate a range the parlay builder itself rejects.
                 #
-                # One confirmed exception: MLB Pitcher Fantasy Score UNDER at
-                # 0.60+ confidence hits 92.3% (36/39, 90-day window, isolated
-                # from OVER which stays at 0/5 — still fully excluded). UNDER's
-                # natural ceiling (pitchers get pulled, innings/pitch counts
-                # are capped) makes even modest model confidence reliable here.
-                # Everything else still needs the 0.75 floor.
-                is_unlocked_pitcher_fs = (
-                    result.get("stat_type") == "Pitcher Fantasy Score"
-                    and result.get("direction") == "UNDER"
-                    and result.get("confidence", 0) >= 0.60
-                )
-                if result.get("confidence", 0) < 0.75 and not is_unlocked_pitcher_fs:
+                # A Pitcher Fantasy Score UNDER exception was added and then
+                # REVERTED the same day (2026-06-24) — see _mlb_trust_score
+                # for the full story. It was built on a broken scoring formula.
+                if result.get("confidence", 0) < 0.75:
                     continue
                 if not _passes_direction_gate(result):
                     continue

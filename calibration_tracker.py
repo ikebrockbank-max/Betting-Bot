@@ -965,18 +965,22 @@ def _fetch_actual_mlb(player: str, stat_type: str, target_date: str):
                 if stat_type == "Pitches Thrown":
                     return st.get("numberOfPitches")
 
-                # ── Pitcher Fantasy Score (PrizePicks official formula) ────────
-                # Outs×0.75 + K×2 + W×4 - ER×2 - H×0.6 - BB×0.6 - HBP×0.6
+                # ── Pitcher Fantasy Score (verified PrizePicks formula) ─────────
+                # Outs×1 + K×3 - ER×3 + QualityStart×4 + Win×6. No H/BB/HBP
+                # penalty. Verified exact against Kyle Freeland 2026-06-19
+                # (22 outs, 8K, 2ER, no decision, QS): 22+24-6+4 = 44, matches
+                # PrizePicks app exactly. The old formula (outs×0.75, K×2,
+                # ER×2, win×4, plus a nonexistent H/BB/HBP penalty, no QS
+                # bonus) gave 26.1 for that same start — a 17.9-point
+                # undercount. Every historical "Pitcher Fantasy Score" hit/
+                # miss in this system was graded against the wrong number.
                 if stat_type == "Pitcher Fantasy Score":
                     outs = st.get("outs") or 0
                     ks   = st.get("strikeOuts") or 0
-                    wins = st.get("wins") or 0
                     er   = st.get("earnedRuns") or 0
-                    h    = st.get("hits") or 0
-                    bb   = st.get("baseOnBalls") or 0
-                    hbp  = st.get("hitBatsmen") or 0
-                    score = (outs * 0.75 + ks * 2.0 + wins * 4.0
-                             - er * 2.0 - h * 0.6 - bb * 0.6 - hbp * 0.6)
+                    win  = (st.get("wins") or 0) > 0
+                    qs   = outs >= 18 and er <= 3
+                    score = outs * 1.0 + ks * 3.0 - er * 3.0 + (4.0 if qs else 0.0) + (6.0 if win else 0.0)
                     return round(score, 2)
 
                 # ── Hitter stats ───────────────────────────────────────────────
