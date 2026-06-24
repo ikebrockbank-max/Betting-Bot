@@ -16,6 +16,7 @@ Supabase env vars (add to GitHub Actions secrets):
 
 import json
 import os
+import re
 import time
 import urllib.request
 import urllib.error
@@ -117,7 +118,7 @@ def _sb_fetch_table(table: str, params: str = "select=*") -> list[dict]:
     result = _sb_request("GET", table, params=params)
     return result if isinstance(result, list) else []
 
-def _sb_upsert(row: dict) -> bool:
+def _sb_upsert(row: dict, _retried_cols: set | None = None) -> bool:
     """Insert or update a pick_log row.
 
     Supabase requires on_conflict to be specified in the URL for
@@ -142,6 +143,19 @@ def _sb_upsert(row: dict) -> bool:
         except Exception:
             body = "<no body>"
         print(f"[calibration] upsert failed: {e} | row keys: {list(row.keys())} | body: {body}")
+        # A single unrecognized/renamed column (PGRST204) was caught live
+        # blocking 100% of writes from one entire workflow for hours, with
+        # the failure silently swallowed by callers. Strip that one column
+        # and retry once per offending column rather than losing the whole
+        # row over a field that's purely "nice to have" for future mining.
+        m = re.search(r"Could not find the '([^']+)' column", body)
+        if m:
+            col = m.group(1)
+            retried = (_retried_cols or set()) | {col}
+            if col in row:
+                trimmed = {k: v for k, v in row.items() if k != col}
+                print(f"[calibration] retrying upsert without unknown column '{col}'")
+                return _sb_upsert(trimmed, _retried_cols=retried)
         return False
     except Exception as e:
         print(f"[calibration] upsert failed: {e}")
