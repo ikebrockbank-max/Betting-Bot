@@ -35,6 +35,9 @@ def _log(msg):
 def _mlb_trust_score(p: dict) -> float:
     stat = p.get("stat_type")
     conf = p.get("confidence", 0)
+    if stat == "Pitcher Fantasy Score" and p.get("direction") == "UNDER":
+        return 0.92           # 92.3% isolated (36/39, 90-day) — strongest signal
+                              # in the system; unlocked at 0.60+ instead of 0.75
     if stat == "Runs":
         return 0.58          # flat ~56-58% across every confidence level (n=66)
     if stat == "Walks":
@@ -87,7 +90,19 @@ def get_top_picks(sports: list[str], n: int = 6) -> dict[str, list[dict]]:
                 # baseline (53%). 75%+ is the only bucket with real significance
                 # (61.2% actual, z=2.0). No reason the single-pick push should
                 # tolerate a range the parlay builder itself rejects.
-                if result.get("confidence", 0) < 0.75:
+                #
+                # One confirmed exception: MLB Pitcher Fantasy Score UNDER at
+                # 0.60+ confidence hits 92.3% (36/39, 90-day window, isolated
+                # from OVER which stays at 0/5 — still fully excluded). UNDER's
+                # natural ceiling (pitchers get pulled, innings/pitch counts
+                # are capped) makes even modest model confidence reliable here.
+                # Everything else still needs the 0.75 floor.
+                is_unlocked_pitcher_fs = (
+                    result.get("stat_type") == "Pitcher Fantasy Score"
+                    and result.get("direction") == "UNDER"
+                    and result.get("confidence", 0) >= 0.60
+                )
+                if result.get("confidence", 0) < 0.75 and not is_unlocked_pitcher_fs:
                     continue
                 if not _passes_direction_gate(result):
                     continue
