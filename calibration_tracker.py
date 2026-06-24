@@ -906,8 +906,10 @@ def _fetch_actual_mlb(player: str, stat_type: str, target_date: str):
         data   = _j.loads(_ur.urlopen(url, timeout=10).read())
         splits = data.get("stats", [{}])[0].get("splits", [])
 
+        date_found = False
         for s in splits:
             if s.get("date") == target_date:
+                date_found = True
                 st = s["stat"]
 
                 # ── Pitcher stats ──────────────────────────────────────────────
@@ -949,6 +951,8 @@ def _fetch_actual_mlb(player: str, stat_type: str, target_date: str):
                     return st.get("runs")
                 if stat_type == "RBI":
                     return st.get("rbi")
+                if stat_type == "Hits+Runs+RBIs":
+                    return (st.get("hits") or 0) + (st.get("runs") or 0) + (st.get("rbi") or 0)
                 if stat_type == "Total Bases":
                     return st.get("totalBases")
                 if stat_type == "Hitter Strikeouts":
@@ -985,10 +989,16 @@ def _fetch_actual_mlb(player: str, stat_type: str, target_date: str):
                              - ks * 1.0)
                     return round(score, 2)
 
-        # No split matched target_date. If the season log has other entries,
-        # the lookup itself worked and this is a confirmed no-play day (late
-        # scratch, rest day, rainout) rather than a transient fetch problem —
-        # resolve it as void instead of retrying forever.
+        # Only conclude DNP when no split matched target_date at all. If a
+        # split DID match but fell through here, that means stat_type isn't
+        # handled above (a real code gap, e.g. a composite stat) — NOT a
+        # no-play day. Treating that as DNP was a bug: it voided Zack
+        # Gelof's Hits+Runs+RBIs pick on 6/23 even though he demonstrably
+        # played that day (his Runs prop resolved fine, same date, same
+        # game log). Return None so it stays pending and gets surfaced as
+        # "could not resolve" instead of silently voided.
+        if date_found:
+            return None
         if splits:
             return "DNP"
         return None
