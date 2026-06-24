@@ -221,13 +221,22 @@ def log_pick(result: dict):
         "avg_val":       avg,
         "edge_pct":      round(abs(avg - line) / (line + 1e-9), 4),
         "n_games":       result.get("n_games", 0),
-        "opp_team":      result.get("opp_team", ""),
-        "home_away":     result.get("home_away", ""),
+        "opp_team":      result.get("opp_team", "") or "",
+        "home_away":     result.get("home_away", "") or "",
         "game_id":       result.get("game_id", ""),
         "pp_id":         result.get("pp_id", ""),
         "projected_stat":result.get("projected_stat"),
         "was_qualified": bool(result.get("was_qualified", False)),
         "resolved":      False,
+        # Extended signals for future mining — added 2026-06-15
+        "adj_hit_rate":  result.get("adj_hit_rate"),          # Bayesian-shrunk hit rate
+        "trend":         result.get("trend"),                  # L3 vs L8 momentum
+        "rest_days":     result.get("rest_days"),              # days since last game
+        "batting_order": result.get("batting_order"),          # MLB lineup position
+        "player_team":   result.get("player_team", ""),        # player's team
+        "park_factor":   result.get("park_factor"),            # ballpark run factor
+        "pitcher_tier":  result.get("pitcher_tier", ""),       # elite/good/average/weak
+        "day_of_week":   datetime.now(timezone.utc).weekday(), # 0=Mon, 6=Sun
     }
 
     if _sb_available():
@@ -356,8 +365,13 @@ def update_stat_calibration():
 
     from datetime import date, timedelta
     cutoff = (date.today() - timedelta(days=90)).isoformat()
+    # result=neq.void — DNPs/scratches were inflating the denominator here
+    # without ever counting as a hit, which silently dragged down real_rate
+    # for every stat type (this feeds score_pick()'s per-stat confidence
+    # correction directly, so the leak wasn't just cosmetic).
     resolved = _sb_fetch_table("pick_log",
-        f"select=sport,stat_type,confidence,result&resolved=eq.true&pick_date=gte.{cutoff}")
+        f"select=sport,stat_type,confidence,result&resolved=eq.true"
+        f"&result=neq.void&pick_date=gte.{cutoff}")
     if not resolved:
         return
 
@@ -515,7 +529,32 @@ def update_results(target_date: str = None):
         elif sport == "MLB":
             actual = _fetch_actual_mlb(player, stat, target_date)
 
-        if actual is not None:
+        if actual == "DNP":
+            # Confirmed scratch/no-play day — resolve as void (matches how
+            # PrizePicks itself handles a DNP: refunded, not graded as a
+            # loss) instead of leaving it "pending" forever, which silently
+            # excluded these from every hit-rate calculation.
+            updates = {
+                "actual_value": None,
+                "result":       "void",
+                "resolved":     True,
+                "proj_error":   None,
+            }
+            print(f"  ⬜ VOID (DNP) {player} {e['direction']} {e['line']} {stat}")
+
+            if _sb_available():
+                _sb_patch(target_date, player, stat, updates)
+                e.update(updates)
+            else:
+                for entry in all_entries:
+                    if (entry.get("player") == player
+                            and entry.get("stat_type") == stat
+                            and entry.get("pick_date") == target_date):
+                        entry.update(updates)
+                        break
+
+            resolved_count += 1
+        elif actual is not None:
             line      = float(e["line"])
             direction = e["direction"]
             hit       = (actual > line) if direction == "OVER" else (actual < line)
@@ -578,6 +617,8 @@ def update_results(target_date: str = None):
     # Build pick_results list for the notification
     pick_results_for_notif = []
     for e in pending:
+        if e.get("result") == "void":
+            continue   # DNP/scratch — exclude from the hit/miss recap entirely
         if e.get("result") is not None or e.get("actual") is not None:
             # Use `is not None` (not `or`) so actual=0 (zero hits, zero walks, etc.)
             # is preserved correctly — `0 or fallback` would silently drop the zero.
@@ -606,13 +647,17 @@ def _load_resolved(days_back: int = 60) -> list[dict]:
     global _resolved_cache, _resolved_cache_days
     if _resolved_cache is not None and _resolved_cache_days == days_back:
         return _resolved_cache
+    # result=neq.void excludes confirmed DNPs/scratches — they're resolved
+    # (so they stop retrying) but shouldn't count as a loss in any hit-rate
+    # or calibration math, same as PrizePicks voiding a scratched pick.
     if _sb_available():
         if days_back:
             from datetime import date, timedelta
             cutoff = (date.today() - timedelta(days=days_back)).isoformat()
-            params = f"select=*&resolved=eq.true&pick_date=gte.{cutoff}&order=pick_date.desc"
+            params = (f"select=*&resolved=eq.true&result=neq.void"
+                      f"&pick_date=gte.{cutoff}&order=pick_date.desc")
         else:
-            params = "select=*&resolved=eq.true&order=pick_date.desc"
+            params = "select=*&resolved=eq.true&result=neq.void&order=pick_date.desc"
         rows = _sb_fetch(params)
         # Normalise column names from DB to internal names
         for r in rows:
@@ -625,7 +670,8 @@ def _load_resolved(days_back: int = 60) -> list[dict]:
         return rows
     else:
         return [e for e in _local_load()
-                if e.get("resolved") and e.get("actual") is not None]
+                if e.get("resolved") and e.get("actual") is not None
+                and e.get("result") != "void"]
 
 
 def calibration_report(min_picks: int = 5):
@@ -822,6 +868,12 @@ def _fetch_actual_nba(player: str, stat_type: str, target_date: str):
 
 
 def _fetch_actual_mlb(player: str, stat_type: str, target_date: str):
+    """
+    Returns the actual stat value, the sentinel "DNP" if the player has a
+    season game log but no entry for target_date (confirmed scratch/DNP —
+    resolve as void, don't keep retrying), or None if we genuinely can't
+    tell yet (player lookup failed, API error, etc).
+    """
     try:
         import json as _j, urllib.request as _ur
         from data.mlb_batter_stats import find_player_id, PITCHER_STAT_TYPES
@@ -837,9 +889,10 @@ def _fetch_actual_mlb(player: str, stat_type: str, target_date: str):
 
         url  = (f"https://statsapi.mlb.com/api/v1/people/{pid}/stats"
                 f"?stats=gameLog&group={group}&season=2026")
-        data = _j.loads(_ur.urlopen(url, timeout=10).read())
+        data   = _j.loads(_ur.urlopen(url, timeout=10).read())
+        splits = data.get("stats", [{}])[0].get("splits", [])
 
-        for s in data.get("stats", [{}])[0].get("splits", []):
+        for s in splits:
             if s.get("date") == target_date:
                 st = s["stat"]
 
@@ -918,6 +971,12 @@ def _fetch_actual_mlb(player: str, stat_type: str, target_date: str):
                              - ks * 1.0)
                     return round(score, 2)
 
+        # No split matched target_date. If the season log has other entries,
+        # the lookup itself worked and this is a confirmed no-play day (late
+        # scratch, rest day, rainout) rather than a transient fetch problem —
+        # resolve it as void instead of retrying forever.
+        if splits:
+            return "DNP"
         return None
     except Exception:
         return None
