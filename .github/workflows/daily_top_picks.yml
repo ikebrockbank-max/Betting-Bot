@@ -40,6 +40,13 @@ jobs:
 
       - name: Run Daily Top Picks
         env:
+          # Without these, calibration_tracker._sb_available() is False and
+          # log_pick() silently falls back to a local JSON file on the
+          # ephemeral runner instead of Supabase — every pick this workflow
+          # ever sent was invisible to every query against pick_log. Confirmed
+          # live: today's 6 sent picks never appeared in Supabase at all.
+          SUPABASE_URL:      https://gggozciyvjeqjnmufigp.supabase.co
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           DISCORD_WEBHOOK_PREMIUM: ${{ secrets.DISCORD_WEBHOOK_PREMIUM }}
           DISCORD_WEBHOOK_FREE: ${{ secrets.DISCORD_WEBHOOK_FREE }}
