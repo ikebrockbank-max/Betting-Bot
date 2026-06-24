@@ -133,6 +133,16 @@ def _sb_upsert(row: dict) -> bool:
     try:
         with urllib.request.urlopen(req, timeout=10):
             return True
+    except urllib.error.HTTPError as e:
+        # urllib's default str(e) is just "HTTP Error 400: Bad Request" with
+        # no detail — read the response body, which PostgREST fills with the
+        # actual reason (unknown column, type mismatch, constraint, etc).
+        try:
+            body = e.read().decode(errors="replace")
+        except Exception:
+            body = "<no body>"
+        print(f"[calibration] upsert failed: {e} | row keys: {list(row.keys())} | body: {body}")
+        return False
     except Exception as e:
         print(f"[calibration] upsert failed: {e}")
         return False
