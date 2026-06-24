@@ -369,7 +369,14 @@ def update_stat_calibration():
     # without ever counting as a hit, which silently dragged down real_rate
     # for every stat type (this feeds score_pick()'s per-stat confidence
     # correction directly, so the leak wasn't just cosmetic).
-    resolved = _sb_fetch_table("pick_log",
+    #
+    # Use _sb_fetch (paginated), NOT _sb_fetch_table (single request, capped
+    # at Supabase's default 1000-row limit). At current volume (500+ MLB
+    # lines/day) a 90-day window is tens of thousands of rows — the capped
+    # version was silently stuck recomputing the same ~1000-row slice every
+    # day since 2026-06-09, blind to everything since. _sb_fetch is already
+    # hardcoded to the pick_log table, which is exactly what's needed here.
+    resolved = _sb_fetch(
         f"select=sport,stat_type,confidence,result&resolved=eq.true"
         f"&result=neq.void&pick_date=gte.{cutoff}")
     if not resolved:
