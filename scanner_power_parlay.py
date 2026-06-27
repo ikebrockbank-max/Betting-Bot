@@ -93,6 +93,10 @@ def _get_json(url: str, extra_headers: dict = None, retries: int = 3) -> dict:
 # Key: (sport, today_str) → raw PrizePicks API response dict.
 _pp_raw_cache: dict[tuple, dict] = {}
 
+# Sports whose PP fetch errored (403/429/etc) on the most recent
+# fetch_standard_lines() call — see that function for why this exists.
+_last_fetch_failures: list[str] = []
+
 def _cache(key: str, ttl: int = 1800):
     """Decorator-style: return cached value if fresh, else None."""
     p = CACHE_DIR / f"{key[:80].replace('/','_').replace(' ','_')}.json"
@@ -160,6 +164,16 @@ def fetch_standard_lines(sports: list[str] = None, days_ahead: int = 1) -> list[
     # Window: now → days_ahead days from now
     now_utc   = datetime.now(timezone.utc)
     cutoff    = now_utc + timedelta(days=days_ahead)
+
+    # Tracks which sports' PP fetch genuinely errored this call (403/429/etc)
+    # vs legitimately returned zero lines — callers can check this to tell
+    # "PrizePicks blocked us" apart from "no games today" instead of both
+    # silently producing the same "no lines" outcome. Confirmed live: two
+    # full days of missed notifications (6/25, 6/26) were 403/429 blocks
+    # from the GitHub Actions IP, indistinguishable in the logs from a
+    # genuine off day until someone checked manually.
+    global _last_fetch_failures
+    _last_fetch_failures = []
 
     lines = []
     for sport in sports:
@@ -243,6 +257,7 @@ def fetch_standard_lines(sports: list[str] = None, days_ahead: int = 1) -> list[
             time.sleep(0.8)
         except Exception as e:
             _log(f"{sport}: PP fetch failed — {e}")
+            _last_fetch_failures.append(sport)
 
     return lines
 

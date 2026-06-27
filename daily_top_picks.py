@@ -59,10 +59,18 @@ def _mlb_trust_score(p: dict) -> float:
     return conf
 
 
-def get_top_picks(sports: list[str], n: int = 6) -> dict[str, list[dict]]:
+def get_top_picks(sports: list[str], n: int = 6) -> tuple[dict[str, list[dict]], list[str]]:
     """
     Run the scanner for each sport and return top N picks per sport.
-    Returns {sport: [pick_dict, ...]}
+    Returns ({sport: [pick_dict, ...]}, [sports whose PP fetch errored]).
+
+    The second element exists so callers can tell "PrizePicks blocked the
+    request" apart from "no games today" — both used to produce an
+    identical empty result with no visible difference, which is exactly
+    how two full days of notifications (2026-06-25, 06-26) went missing
+    silently: PrizePicks returned 403/429 to the GitHub Actions IP, and it
+    looked indistinguishable from a legitimate slate-free day until someone
+    checked the raw logs by hand.
     """
     import scanner_power_parlay as s
     # This is the same direction/stat-type gate parlays already use (blocks
@@ -73,10 +81,13 @@ def get_top_picks(sports: list[str], n: int = 6) -> dict[str, list[dict]]:
     from parlay_builder import _passes_direction_gate
 
     results = {}
+    fetch_failures = []
     for sport in sports:
         _log(f"Scanning {sport}...")
         try:
             lines = s.fetch_standard_lines([sport])
+            if getattr(s, "_last_fetch_failures", None):
+                fetch_failures.extend(s._last_fetch_failures)
             if not lines:
                 _log(f"  {sport}: no lines today")
                 results[sport] = []
@@ -129,8 +140,9 @@ def get_top_picks(sports: list[str], n: int = 6) -> dict[str, list[dict]]:
         except Exception as e:
             _log(f"  {sport} scan failed: {e}")
             results[sport] = []
+            fetch_failures.append(sport)
 
-    return results
+    return results, fetch_failures
 
 
 def _build_advanced_note(p: dict) -> str:
@@ -554,7 +566,20 @@ def run(sports: list[str] | None = None):
     sports_to_scan = sports or ["MLB", "NBA", "WNBA"]
     _log(f"Scoping to: {', '.join(sports_to_scan)}")
 
-    picks_by_sport = get_top_picks(sports_to_scan, n=6)
+    picks_by_sport, fetch_failures = get_top_picks(sports_to_scan, n=6)
+
+    if fetch_failures:
+        _log(f"PrizePicks fetch failed for: {', '.join(fetch_failures)}")
+        try:
+            from notify import send_push
+            send_push(
+                f"PrizePicks fetch failed for: {', '.join(fetch_failures)}. "
+                f"No picks could be scanned for these sports today — this is "
+                f"a blocked/rate-limited request, not a real no-games day.",
+                title="⚠️ Daily Picks: PrizePicks fetch failed",
+            )
+        except Exception as e:
+            _log(f"Failure alert push also failed: {e}")
 
     total = sum(len(v) for v in picks_by_sport.values())
     if total == 0:

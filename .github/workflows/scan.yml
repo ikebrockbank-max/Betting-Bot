@@ -2,7 +2,14 @@ name: PP + Underdog Scanner
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    # Raised from every 15 min — that's 96 PrizePicks API calls/day from this
+    # workflow alone, on top of power_parlay.yml's own calls. Confirmed cause
+    # of two full days (6/25, 6/26) of silently failed daily picks: PrizePicks
+    # returned 403/429 to the GitHub Actions runner's IP, while the same
+    # request succeeded instantly from a non-Actions IP — a volume-triggered
+    # block, not an outage. 30 min still gives same-day bug/flash-sale alerts
+    # at half the call volume.
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 jobs:
