@@ -1134,10 +1134,21 @@ def score_pick(stats: dict, pick: dict) -> dict:
     #     Use 0.20 — any player sitting out 20%+ is too risky for OVER.
     #   Cumulative stats (Runs, HFS, Walks): zero is normal game variance even for
     #     good starters. Use 0.30 — only filter true bench/platoon risk.
+    #   Home Runs: even elite full-time sluggers run 65-90% zero-HR games as a
+    #   structural baseline (an MVP-level 35-40 HR/season hitter is still ~73-75%
+    #   zero-HR per game) — the 0.30 cutoff hard-gated every single HR demon pick
+    #   today (255/255), including Gunnar Henderson and Juan Soto, because it was
+    #   measuring normal HR rarity, not bench/role risk. 0.90 still catches real
+    #   extreme-slump/bench cases without blocking the entire stat type.
     _BINARY_STATS = {"Hits", "Total Bases", "Singles", "Stolen Bases"}
     direction = pick.get("direction", "OVER")
     p_zero = stats.get("p_zero_game", 0.0)
-    p_zero_threshold = 0.20 if stat_type in _BINARY_STATS else 0.30
+    if stat_type in _BINARY_STATS:
+        p_zero_threshold = 0.20
+    elif stat_type == "Home Runs":
+        p_zero_threshold = 0.90
+    else:
+        p_zero_threshold = 0.30
     if (sport == "MLB"
             and direction == "OVER"
             and stat_type not in _PITCHER_STAT_TYPES
