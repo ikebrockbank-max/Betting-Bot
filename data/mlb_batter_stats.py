@@ -393,10 +393,25 @@ def _find_player_game(player_name: str) -> dict | None:
                         "player_team": g.get("home_name", "")}
     return None
 
-def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | None:
+def get_player_stats(player_name: str, stat_type: str, line: float,
+                      forced_direction: str | None = None) -> dict | None:
     """
     Full stat analysis for any PP MLB stat type, with matchup context and H2H.
     Returns scoring dict or None if insufficient data.
+
+    forced_direction: when set ("OVER"/"UNDER"), skips the avg-vs-line
+    auto-inference below and uses this direction for hit_rate/adj_hit_rate.
+    Needed for goblin/demon lines, which are direction-locked bets (always
+    "More", just easier or harder) — auto-inference silently picks whichever
+    side matches the player's average, which for any low-average counting
+    stat (Home Runs, at minimum) is almost always the opposite of what's
+    actually being offered. Confirmed live: every Home Run demon line today
+    auto-inferred UNDER (since avg HR/game is well under the 0.5 line for
+    everyone, including elite sluggers) while being scored as if it were the
+    OVER bet it actually is — feeding a ~90% UNDER hit-rate into an OVER
+    confidence calculation, backwards for every single pick. Standard lines
+    (no forced_direction passed) keep the existing auto-inference, which is
+    correct there — the system is meant to find whichever side has signal.
     """
     games = get_player_game_log(player_name, stat_type)
     if not games:
@@ -428,13 +443,16 @@ def get_player_stats(player_name: str, stat_type: str, line: float) -> dict | No
     over_hits  = sum(1 for v in recent if v > line)
     under_hits = sum(1 for v in recent if v < line)
 
-    # Direction: use L5 avg when season avg is within 3% of line (borderline cases)
-    edge_pct = abs(avg_n - line) / (line + 1e-9)
-    if edge_pct < 0.03 and len(l5) >= 5:
-        # Too close to call from season avg — let recent form decide
-        direction = "OVER" if avg_l5 > line else "UNDER"
+    if forced_direction in ("OVER", "UNDER"):
+        direction = forced_direction
     else:
-        direction = "OVER" if avg_n > line else "UNDER"
+        # Direction: use L5 avg when season avg is within 3% of line (borderline cases)
+        edge_pct = abs(avg_n - line) / (line + 1e-9)
+        if edge_pct < 0.03 and len(l5) >= 5:
+            # Too close to call from season avg — let recent form decide
+            direction = "OVER" if avg_l5 > line else "UNDER"
+        else:
+            direction = "OVER" if avg_n > line else "UNDER"
     hit_rate  = (over_hits / n) if direction == "OVER" else (under_hits / n)
 
     # Bayesian-adjusted hit rate: shrinks small-sample extremes toward 0.50.

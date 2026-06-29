@@ -567,11 +567,12 @@ def _get_mlb_pitcher_id(player_name: str) -> str | None:
             pass
     return None
 
-def _get_mlb_stats(player_name: str, stat_type: str, line: float) -> dict | None:
+def _get_mlb_stats(player_name: str, stat_type: str, line: float,
+                    forced_direction: str | None = None) -> dict | None:
     """Route all MLB stat types through the comprehensive batter/pitcher stats module."""
     try:
         from data.mlb_batter_stats import get_player_stats as _mlb_full
-        return _mlb_full(player_name, stat_type, line)
+        return _mlb_full(player_name, stat_type, line, forced_direction=forced_direction)
     except Exception as e:
         _log(f"MLB stats failed {player_name} {stat_type}: {e}")
         return None
@@ -790,9 +791,15 @@ def get_stats_for_pick(pick: dict) -> dict | None:
                     pass
             return _get_wnba_stats(player, stat, line, opp_team=opp_team)
 
+        # MLB takes an explicit direction override — see _get_mlb_stats /
+        # get_player_stats docstrings for why goblin/demon lines need it
+        # (they're direction-locked bets; auto-inferring from avg-vs-line
+        # silently picks the wrong side for any low-average counting stat).
+        if sport == "MLB":
+            return _get_mlb_stats(player, stat, line, forced_direction=pick.get("direction"))
+
         dispatchers = {
             "NBA":    _get_nba_stats,
-            "MLB":    _get_mlb_stats,
             "TENNIS": _get_tennis_stats,
             "SOCCER": _get_soccer_stats,
         }
@@ -2576,9 +2583,18 @@ def run(sports: list[str] = None, force: bool = False):
         _log(f"Goblin lines to score (after pre-filter): {len(_GOBLIN_GOOD)}")
         _log(f"Demon  lines to score (after pre-filter): {len(_DEMON_GOOD)}")
 
+        # Goblin/demon lines are direction-locked "More" bets (easier/harder
+        # version of the same over line) — without this, get_stats_for_pick
+        # auto-infers direction from avg-vs-line, which for any low-average
+        # counting stat (confirmed: Home Runs, every single line, all 255
+        # today) silently picks UNDER and feeds that hit_rate into an OVER
+        # confidence calc. Goblin/demon for pitcher-allowed stats (ERA, Hits
+        # Allowed, etc.) may actually be "Less" bets — not verified either
+        # way, flagging as a follow-up rather than guessing here.
         # Score goblin lines
         scored_goblin = []
         for pick in _GOBLIN_GOOD:
+            pick["direction"] = "OVER"
             stats = get_stats_for_pick(pick)
             if stats is None or stats.get("n_games", 0) < MIN_GAMES:
                 continue
@@ -2591,6 +2607,7 @@ def run(sports: list[str] = None, force: bool = False):
         # Score demon lines
         scored_demon = []
         for pick in _DEMON_GOOD:
+            pick["direction"] = "OVER"
             stats = get_stats_for_pick(pick)
             if stats is None or stats.get("n_games", 0) < MIN_GAMES:
                 continue
