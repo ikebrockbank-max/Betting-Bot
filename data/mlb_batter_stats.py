@@ -15,7 +15,7 @@ BATTER:
   Walks                  — BB
 
 PITCHER (supplementing existing module):
-  Pitcher Fantasy Score  — K×3 + IP×5 - ER×2 - H×0.5 (approximate PP formula)
+  Pitcher Fantasy Score  — Outs×1 + K×3 - ER×3 + QS×4 (outs≥18 & ER≤3) + W×6
   Pitching Outs          — IP × 3
   Earned Runs Allowed    — ER
   Hits Allowed           — H allowed

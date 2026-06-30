@@ -44,9 +44,10 @@ POOL_LIMIT     = 25     # only consider top-N picks by p_hit when generating com
 
 # Sport-level calibration multipliers — applied to p_hit for pool ranking and Kelly.
 # Based on 3259-pick dataset: WNBA bet picks 60% (n=72) vs MLB 52% (n=634).
-# A 1.06x multiplier on WNBA effectively recalibrates to observed accuracy.
+# True relative edge: 60/55 ≈ 1.09 — WNBA picks naturally rank higher in pool,
+# more WNBA legs appear in parlays. Bumped from 1.06 → 1.10.
 SPORT_MULTIPLIERS = {
-    "WNBA": 1.06,
+    "WNBA": 1.10,
 }
 
 # ── Tiered slot system ─────────────────────────────────────────────────────────
@@ -96,9 +97,7 @@ EXCLUDED_STAT_TYPES = {
     "Pitcher Strikeouts",   # 46% hit rate (24 bet picks) — no edge
     "Strikeouts",           # same stat, alternate API name
     "Pitching Outs",        # 0% actual hit rate (6 picks)
-    "Hits Allowed",         # 38% hit rate (21 bet picks) — confirmed bad
-    "Pitcher Fantasy Score",# OVER: 0/4 = 0% stays excluded.
-                            # UNDER: 100% (10/10) — unlocked via UNDER_EXCEPTIONS below.
+    "Hits Allowed",         # 32.4% hit rate (34 picks) — both directions broken
     # MLB batter — confirmed bad
     "Hitter Strikeouts",    # 49% (37 bet picks) — coin flip, confirmed bad
     "Hits+Runs+RBIs",       # composite: 3 uncorrelated stats inflate false confidence
@@ -115,26 +114,33 @@ EXCLUDED_STAT_TYPES = {
     "Pts+Asts",             # 60% (10 bet picks) — looks better now, wait for n≥30
     "Rebs+Asts",            # 86% (7 bet picks) — tiny sample, wait for n≥30
 }
+# NOTE: Pitcher Fantasy Score was previously excluded here based on wrong-formula data
+# (OVER: 0/4 = 0%, UNDER: 100% (10/10) — both computed with incorrect formula).
+# Post-fix clean data (56 picks, June 25-28): OVER 64% (16/25), UNDER 67.7% (21/31),
+# overall 66.1%. Both directions are our best-performing category. PFS is now unrestricted
+# and handled like any other stat — OVER passes freely, UNDER passes via UNDER_EXCEPTIONS.
 
-# Stat types that are EXCLUDED for OVER but explicitly allowed for UNDER.
-# Each entry requires a higher hit_rate floor (see eligible filter below).
-# Data source: analyze_unders.py run 2026-06-13 on 228 UNDER bet picks.
+# Stat types where UNDER is explicitly allowed despite PARLAY_OVERS_ONLY.
+# Each entry requires hit_rate >= MIN_HIT_RATE_UNDER_EXCEPTION to pass the gate.
 UNDER_EXCEPTIONS = {
-    "Pitcher Fantasy Score",  # UNDER: 100% (10/10). Structural: pitchers pulled early,
-                              # natural ceiling on fantasy production. Hit_rate floor: 0.75.
+    "Pitcher Fantasy Score",  # UNDER: 67.7% (21/31), OVER: 64% (16/25). Both directions
+                              # confirmed strong post-formula-fix (56 clean picks, June 25-28).
+                              # Floor set at 0.60 — category avg is 67.7%, individual picks
+                              # at 60%+ are solid. Formula: Outs×1 + K×3 - ER×3 + QS×4 + W×6.
 }
-MIN_HIT_RATE_UNDER_EXCEPTION = 0.75  # stricter than OVER floor (0.67) — limited sample
+MIN_HIT_RATE_UNDER_EXCEPTION = 0.60  # was 0.75 (based on stale wrong-formula 100% claim)
 
 # Quality gates — all three must pass for a pick to enter a parlay.
-# 3259-pick dataset (2026-06-13): confidence buckets vs actual hit rate on BET picks:
-#   65–70%:  47% actual (n=196) — negative EV
-#   70–75%:  54% actual (n=280) — real signal, positive EV
-#   75–80%:  57% actual (n=194) — best bucket
-#   80–85%:  55% actual (n=33)  — over-confident, model thinks 82% but hits 55%
-MIN_CONF_PARLAY  = 0.70   # 65-70% bucket hits 47% (n=196 bet picks) — no edge below 70%
-MIN_HIT_RATE     = 0.67   # historical hit rate is our most reliable signal
+# 728-pick signal_miner dataset (2026-06-15):
+#   conf 65–70%: 47% actual (n=196) — NEGATIVE EV, confirmed dead zone
+#   conf 70–75%: 53% actual (n=290) — marginal, just above baseline
+#   conf 75–80%: 57% actual (n=199) — best reliable bucket
+#   conf >75%:   61.2% actual (n=147, z=2.0) — only statistically significant signal
+MIN_CONF_PARLAY  = 0.75   # raised from 0.70 — signal_miner confirms z=2.0 at 75% (61% actual)
+MIN_HIT_RATE     = 0.67   # floor for adj_hit_rate (Bayesian-shrunk)
+MAX_HIT_RATE_RAW = 0.83   # HR 83-90% raw hits only 29% (z=-2.0) — hot streaks mean line moved up
 MIN_P_HIT_PARLAY = 0.70   # model probability must agree with confidence
-MIN_EDGE_PCT_PARLAY = 0.30  # 15-25% edge zone hits 38-45% (n=32) — cut below 30%
+MIN_EDGE_PCT_PARLAY = 0.30  # edge <8% hits 37% (z=-2.3), confirmed dead; 35-50% edge hits 60%
 # UNDER picks banned from parlays.
 # 3259-pick dataset: OVER bet picks 56% (n=478), UNDER bet picks 47% (n=228).
 # UNDERs confirmed bad with n≥150 — OVERS_ONLY is the correct long-term policy.
@@ -164,24 +170,28 @@ def _get_p_hit(pick: dict) -> float:
     p_under    = pick.get("p_under")
     hit_rate   = pick.get("hit_rate", 0.0)
 
+    # Prefer adj_hit_rate (Bayesian-shrunk) over raw hit_rate for the model cap.
+    # adj_hit_rate shrinks 9/10 from 90% → 72%, preventing the model from claiming
+    # 85%+ confidence on players with small samples. Fall back to hit_rate if not set.
+    cap_rate = pick.get("adj_hit_rate")
+    if cap_rate is None:
+        cap_rate = hit_rate
+
     # Get raw model probability
     if direction == "OVER" and p_over and 0.05 < p_over < 0.99:
         model_p = p_over
     elif direction == "UNDER" and p_under and 0.05 < p_under < 0.99:
         model_p = p_under
     else:
-        # No model probability — fall back to confidence, capped by hit rate.
-        # Use `is not None` not `> 0.10` — hit_rate=0.0 is a real value (player
-        # never hit this line) and should still cap the model, not be skipped.
+        # No model probability — fall back to confidence, capped by adjusted hit rate.
         conf = pick.get("confidence", 0.62)
         sport = pick.get("sport", "")
-        base = min(conf, hit_rate + MAX_MODEL_OVERREACH) if hit_rate is not None else conf
+        base = min(conf, cap_rate + MAX_MODEL_OVERREACH) if cap_rate is not None else conf
         return min(0.95, base * SPORT_MULTIPLIERS.get(sport, 1.0))
 
-    # Cap: model can't claim more than hit_rate + MAX_MODEL_OVERREACH.
-    # hit_rate=0.0 is falsy but it IS a real value — use `is not None`.
-    if hit_rate is not None:
-        model_p = min(model_p, hit_rate + MAX_MODEL_OVERREACH)
+    # Cap: model can't claim more than adj_hit_rate + MAX_MODEL_OVERREACH.
+    if cap_rate is not None:
+        model_p = min(model_p, cap_rate + MAX_MODEL_OVERREACH)
 
     # Sport calibration: WNBA empirically hits 60% vs MLB 52% — upward adjust.
     sport = pick.get("sport", "")
@@ -332,7 +342,11 @@ def build_diverse_parlays(
     eligible = [
         p for p in scored_picks
         if p.get("confidence", 0) >= MIN_CONF_PARLAY
-        and p.get("hit_rate", 0) >= MIN_HIT_RATE
+        # Bayesian-shrunk hit rate floor: requires ~8/10 hits to pass.
+        and (p.get("adj_hit_rate") if p.get("adj_hit_rate") is not None else p.get("hit_rate", 0)) >= MIN_HIT_RATE
+        # Raw hit rate ceiling: HR 83-90% raw hits only 29% (z=-2.0, n=17).
+        # PrizePicks moves the line up to price in hot streaks — high raw HR = overpriced line.
+        and p.get("hit_rate", 0) <= MAX_HIT_RATE_RAW
         and _get_p_hit(p) >= MIN_P_HIT_PARLAY
         and p.get("edge_pct", 0) >= MIN_EDGE_PCT_PARLAY
         and _passes_direction_gate(p)
@@ -628,11 +642,11 @@ def format_parlay_ntfy(parlays: list[dict], bankroll: float,
             arrow  = "↑" if p.get("direction") == "OVER" else "↓"
             sport  = p.get("sport", "")
             e      = {"MLB": "⚾", "WNBA": "🏀", "NBA": "🏀", "NHL": "🏒"}.get(sport, "🎯")
-            conf   = p.get("conf_pct") or int(p.get("confidence", 0) * 100)
+            p_hit  = int(_get_p_hit(p) * 100)
             hr     = int(p.get("hit_rate", 0) * 100)
             lines.append(
                 f"  {e}{arrow} {p['player']} {p.get('direction','OVER')} {p['line']} "
-                f"{p['stat_type']} ({conf}% · {hr}% HR)"
+                f"{p['stat_type']} ({p_hit}% p · {hr}% HR)"
             )
         lines.append("")
 
@@ -645,8 +659,10 @@ def format_parlay_ntfy(parlays: list[dict], bankroll: float,
         payout = int(par["payout"])
         lines.append(f"── Standard {i}: ${bet:.0f}→${win:.0f} | {n_legs}-pick {payout}x | {p_win}% ──")
         for leg in par["leg_summary"]:
-            arrow = "↑" if leg["direction"] == "OVER" else "↓"
-            lines.append(f"  {arrow} {leg['player']} — {leg['direction']} {leg['line']} {leg['stat_type']}  ({int(leg['hit_rate']*100)}% HR, avg {leg['avg']})")
+            arrow  = "↑" if leg["direction"] == "OVER" else "↓"
+            p_hit  = leg.get("p_hit_pct", int(leg.get("p_hit", 0) * 100))
+            hr     = int(leg["hit_rate"] * 100)
+            lines.append(f"  {arrow} {leg['player']} — {leg['direction']} {leg['line']} {leg['stat_type']}  ({p_hit}% p · {hr}% HR · avg {leg['avg']})")
         lines.append("")
 
     # Goblin parlay
@@ -657,7 +673,9 @@ def format_parlay_ntfy(parlays: list[dict], bankroll: float,
         n_legs = par["n_legs"]
         lines.append(f"── 🧌 Goblin: ${bet:.0f}→~${win:.0f} | {n_legs}-pick ~{par['payout']}x | {p_win}% (check app for real multiplier) ──")
         for leg in par["leg_summary"]:
-            lines.append(f"  ↑ {leg['player']} — OVER {leg['line']} {leg['stat_type']}  ({int(leg['hit_rate']*100)}% HR, avg {leg['avg']})")
+            p_hit = leg.get("p_hit_pct", int(leg.get("p_hit", 0) * 100))
+            hr    = int(leg["hit_rate"] * 100)
+            lines.append(f"  ↑ {leg['player']} — OVER {leg['line']} {leg['stat_type']}  ({p_hit}% p · {hr}% HR · avg {leg['avg']})")
         lines.append("")
 
     # Demon parlay
@@ -668,8 +686,10 @@ def format_parlay_ntfy(parlays: list[dict], bankroll: float,
         n_legs = par["n_legs"]
         lines.append(f"── 😈 Demon: ${bet:.0f}→~${win:.0f} | {n_legs}-pick ~{par['payout']}x | {p_win}% (check app for real multiplier) ──")
         for leg in par["leg_summary"]:
-            arrow = "↑" if leg["direction"] == "OVER" else "↓"
-            lines.append(f"  {arrow} {leg['player']} — {leg['direction']} {leg['line']} {leg['stat_type']}  ({int(leg['hit_rate']*100)}% HR, avg {leg['avg']})")
+            arrow  = "↑" if leg["direction"] == "OVER" else "↓"
+            p_hit  = leg.get("p_hit_pct", int(leg.get("p_hit", 0) * 100))
+            hr     = int(leg["hit_rate"] * 100)
+            lines.append(f"  {arrow} {leg['player']} — {leg['direction']} {leg['line']} {leg['stat_type']}  ({p_hit}% p · {hr}% HR · avg {leg['avg']})")
         lines.append("")
 
     body = "\n".join(lines)
