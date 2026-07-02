@@ -1681,12 +1681,31 @@ def score_pick(stats: dict, pick: dict) -> dict:
         if _adj != 0.0:
             confidence = round(min(0.95, max(0.35, confidence + _adj)), 3)
 
-        # ── Stat-type signal boosts (best performing categories from data) ─────
-        # MLB Walks: 60% actual hit rate  (10 picks) — genuine edge
-        # MLB Walks Allowed: 58% actual hit rate  (12 picks) — genuine edge
-        # Both consistently outperform all other MLB categories.
-        if sport == "MLB" and stat_type in ("Walks", "Walks Allowed"):
-            confidence = round(min(0.95, confidence * 1.05), 3)
+        # ── Stat-type signal adjustments for OVER picks ──────────────────────
+        # Based on 5-day clean dataset (June 24-28, post-formula-fix).
+        # Walks (44.0%, 11/25) and Walks Allowed (38.2%, 13/34) are both
+        # confirmed losers — previous +5% boost was based on stale data.
+        _STAT_OVER_ADJ = {
+            "Walks":         -0.02,   # 44.0% actual — below break-even
+            "Walks Allowed": -0.03,   # 38.2% actual — confirmed bad both directions
+            "Total Bases":   -0.01,   # 50.7% (69/136) — marginally below break-even
+            "Runs":          -0.01,   # 50.0% (52/104) — no edge at break-even
+        }
+        if sport == "MLB":
+            _st_adj = _STAT_OVER_ADJ.get(stat_type, 0.0)
+            if _st_adj != 0.0:
+                confidence = round(min(0.95, max(0.35, confidence + _st_adj)), 3)
+
+    # ── Pitcher Fantasy Score boost (both directions) ─────────────────────────
+    # Applied outside the OVER-only block — PFS UNDER is equally strong.
+    # Clean post-formula-fix data (56 picks, June 25-28):
+    #   OVER:  64.0% (16/25) — best MLB OVER category by wide margin
+    #   UNDER: 67.7% (21/31) — best MLB UNDER category
+    #   Total: 66.1% (37/56) — #1 category overall, 14 pts above break-even
+    # The +0.02 corrects for PFS OVER also receiving the generic MLB -0.03 haircut
+    # above, which was calibrated on all MLB picks before PFS was properly scored.
+    if sport == "MLB" and stat_type == "Pitcher Fantasy Score":
+        confidence = round(min(0.95, max(0.35, confidence + 0.02)), 3)
 
     # ── Probability distribution engine ──────────────────────────────────────────
     # Model the stat as normally distributed around the projection.
