@@ -94,6 +94,7 @@ def get_top_picks(sports: list[str], n: int = 6) -> tuple[dict[str, list[dict]],
                 continue
 
             scored = []
+            best_rejected = None   # highest-confidence pick that failed the floor
             for pick in lines:
                 stats = s.get_stats_for_pick(pick)
                 if not stats:
@@ -101,22 +102,32 @@ def get_top_picks(sports: list[str], n: int = 6) -> tuple[dict[str, list[dict]],
                 result = s.score_pick(stats, pick)
                 if result.get("skip_reason"):
                     continue
-                # Matches MIN_CONF_PARLAY in parlay_builder.py. Their signal_miner
-                # data (728 picks, 2026-06-15) confirmed 65-70% confidence is a
-                # negative-EV dead zone (47% actual) and 70-75% is barely above
-                # baseline (53%). 75%+ is the only bucket with real significance
-                # (61.2% actual, z=2.0). No reason the single-pick push should
-                # tolerate a range the parlay builder itself rejects.
-                #
-                # A Pitcher Fantasy Score UNDER exception was added and then
-                # REVERTED the same day (2026-06-24) — see _mlb_trust_score
-                # for the full story. It was built on a broken scoring formula.
-                if result.get("confidence", 0) < 0.75:
+                # The floor compares against POST-calibration confidence. The old
+                # 0.75 floor was lifted from signal_miner's RAW-confidence buckets
+                # (raw 75%+ → 61.2% actual), but score_pick's Supabase calibration
+                # blends confidence toward those actual hit rates — so on the
+                # GitHub runner (where Supabase IS reachable) a raw 0.80 pick
+                # comes out ≈0.62 and nothing could ever clear 0.75. Result:
+                # "0 qualified" and silent no-send every day from 2026-06-25
+                # to 2026-07-05. A calibrated 0.60 ≈ the old raw-0.75 bucket
+                # (61.2% actual) and is well above -110 break-even (52.4%).
+                if result.get("confidence", 0) < 0.60:
+                    conf = result.get("confidence", 0)
+                    if best_rejected is None or conf > best_rejected[0]:
+                        best_rejected = (conf, result.get("player", "?"),
+                                         result.get("stat_type", "?"))
                     continue
                 if not _passes_direction_gate(result):
                     continue
                 scored.append(result)
                 time.sleep(0.02)
+
+            # Diagnostic: when nothing qualifies, show how close the best pick
+            # came. Distinguishes "weak slate" from "floor is unreachable" —
+            # the exact failure mode that went unnoticed for 11 days.
+            if not scored and best_rejected:
+                _log(f"  {sport}: best rejected pick was "
+                     f"{best_rejected[1]} {best_rejected[2]} at {best_rejected[0]:.3f}")
 
             if sport == "MLB":
                 scored.sort(key=_mlb_trust_score, reverse=True)
@@ -584,6 +595,18 @@ def run(sports: list[str] | None = None):
     total = sum(len(v) for v in picks_by_sport.values())
     if total == 0:
         _log("No qualified picks today — skipping notification")
+        # Still push a one-liner. A silent no-send is indistinguishable from a
+        # broken pipeline — which is how zero notifications went out for 11
+        # straight days (2026-06-25 → 07-05) before anyone noticed.
+        try:
+            from notify import send_push
+            send_push(
+                "No picks cleared the 0.60 calibrated-confidence floor today. "
+                "System ran normally.",
+                title="Daily Picks: none qualified",
+            )
+        except Exception as e:
+            _log(f"No-picks heads-up push failed: {e}")
         return False
 
     send_notifications(picks_by_sport)
