@@ -32,6 +32,33 @@ def _log(msg):
 # below (parlay_builder._passes_direction_gate). That gate already removes the
 # confirmed-bad stat types and the UNDER bias; this just orders what's left
 # toward the categories with the best track record (14-day review, 2026-06-18).
+def _is_elite(p: dict) -> bool:
+    """
+    Elite tier — the picks worth actually betting. Backtested on 3,974
+    gate-passing resolved picks over 27 active days (analysis_elite.py,
+    2026-07-06):
+      conf >= 0.75 (calibrated):              60.5% (75/124), ~4.6/day
+      HFS OVER line>=6, season hr>=0.7,
+        pitcher tier known & not above_avg:   56.4% (66/117), ~4.3/day
+      PFS OVER line 12-25, season hr .6-.8:   58.8% (20/34),  ~1.3/day
+    Elites sort above everything else so a 1-4 picks/day user can take
+    just the starred picks.
+    """
+    if p.get("confidence", 0) >= 0.75:
+        return True
+    stat = p.get("stat_type", "")
+    hr = p.get("hit_rate", 0) or 0
+    line = float(p.get("line", 0) or 0)
+    if (stat == "Hitter Fantasy Score" and p.get("direction") == "OVER"
+            and line >= 6.0 and hr >= 0.7
+            and p.get("pitcher_tier", "") in ("weak", "below_avg", "average", "ace")):
+        return True
+    if (stat == "Pitcher Fantasy Score" and p.get("direction") == "OVER"
+            and 12 <= line <= 25 and 0.6 <= hr < 0.8):
+        return True
+    return False
+
+
 def _mlb_trust_score(p: dict) -> float:
     stat = p.get("stat_type")
     conf = p.get("confidence", 0)
@@ -129,10 +156,13 @@ def get_top_picks(sports: list[str], n: int = 6) -> tuple[dict[str, list[dict]],
                 _log(f"  {sport}: best rejected pick was "
                      f"{best_rejected[1]} {best_rejected[2]} at {best_rejected[0]:.3f}")
 
+            # Elite picks always rank above non-elite regardless of raw score
             if sport == "MLB":
-                scored.sort(key=_mlb_trust_score, reverse=True)
+                scored.sort(key=lambda x: (_is_elite(x), _mlb_trust_score(x)),
+                            reverse=True)
             else:
-                scored.sort(key=lambda x: x["confidence"], reverse=True)
+                scored.sort(key=lambda x: (_is_elite(x), x["confidence"]),
+                            reverse=True)
 
             # Deduplicate by player — keep best pick per player
             seen_players = set()
@@ -335,8 +365,9 @@ def format_ntfy_push(picks_by_sport: dict[str, list]) -> tuple[str, str]:
             opp   = p.get("opp_team", "")
             opp_s = f" vs {opp.split()[-1]}" if opp and opp != "unknown" else ""
 
+            star = "⭐ " if _is_elite(p) else ""
             body_lines.append(
-                f"{i}. {p['player']} {arrow}{p['line']} {p['stat_type']} "
+                f"{i}. {star}{p['player']} {arrow}{p['line']} {p['stat_type']} "
                 f"({conf}% | {hits}/{n}){opp_s}"
             )
 
@@ -577,7 +608,9 @@ def run(sports: list[str] | None = None):
     sports_to_scan = sports or ["MLB", "NBA", "WNBA"]
     _log(f"Scoping to: {', '.join(sports_to_scan)}")
 
-    picks_by_sport, fetch_failures = get_top_picks(sports_to_scan, n=6)
+    # n=4: user takes 1-4 picks/day; elite tier produces ~4-6/day and sorts
+    # to the top, so 4 slots ≈ the starred picks plus minimal filler.
+    picks_by_sport, fetch_failures = get_top_picks(sports_to_scan, n=4)
 
     if fetch_failures:
         _log(f"PrizePicks fetch failed for: {', '.join(fetch_failures)}")
