@@ -1068,6 +1068,35 @@ if __name__ == "__main__":
             print("Not enough data yet.")
         for st, mae in sorted(get_all_stat_maes().items(), key=lambda x: -x[1]):
             print(f"  MAE {st}: ±{mae:.2f}")
+    elif cmd == "matrix":
+        # Hit rate by stat_type × confidence bucket × direction. Optional arg
+        # limits to picks on/after a date: `matrix 2026-06-24`. Confidence is
+        # whatever was logged at pick time (post-calibration on the runner).
+        since = sys.argv[2] if len(sys.argv) > 2 else None
+        params = "select=sport,stat_type,direction,confidence,result&resolved=eq.true"
+        if since:
+            params += f"&pick_date=gte.{since}"
+        rows = [r for r in _sb_fetch(params) if r.get("result") in ("HIT", "MISS")]
+        print(f"MATRIX REPORT — {len(rows)} resolved picks"
+              + (f" since {since}" if since else " (all time)"))
+        buckets = [(0.0, 0.50), (0.50, 0.60), (0.60, 0.65), (0.65, 0.70),
+                   (0.70, 0.75), (0.75, 1.01)]
+        cells: dict = {}
+        for r in rows:
+            conf = float(r.get("confidence") or 0)
+            for lo, hi in buckets:
+                if lo <= conf < hi:
+                    key = (r.get("sport", ""), r.get("stat_type", ""),
+                           r.get("direction", ""), f"{int(lo*100)}-{int(hi*100)}")
+                    h, n = cells.get(key, (0, 0))
+                    cells[key] = (h + (r["result"] == "HIT"), n + 1)
+                    break
+        MIN_N = 15   # below this a "great" rate is indistinguishable from luck
+        ranked = sorted(((h / n, h, n, k) for k, (h, n) in cells.items() if n >= MIN_N),
+                        reverse=True)
+        print(f"{'rate':>6} {'hits':>5} {'n':>5}  sport | stat_type | direction | bucket")
+        for rate, h, n, (sport, stat, d, b) in ranked:
+            print(f"{rate:6.1%} {h:5d} {n:5d}  {sport} | {stat} | {d} | {b}%")
     elif cmd == "status":
         if _sb_available():
             rows = _sb_fetch("select=count&resolved=eq.true")
@@ -1080,4 +1109,5 @@ if __name__ == "__main__":
         print("  python3 calibration_tracker.py update [YYYY-MM-DD]")
         print("  python3 calibration_tracker.py report")
         print("  python3 calibration_tracker.py calibration")
+        print("  python3 calibration_tracker.py matrix [YYYY-MM-DD]")
         print("  python3 calibration_tracker.py status")

@@ -1,0 +1,39 @@
+name: Ad-hoc Report
+
+# Manual-only diagnostic runner. Exists because Supabase credentials live
+# only in GitHub Secrets — pick_log analysis is impossible from a local
+# machine, and reverse-engineering hit rates out of rounded report logs
+# gives ±6% error bars. Dispatch this instead.
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'calibration_tracker.py subcommand (report, matrix, calibration, status)'
+        required: false
+        default: 'matrix'
+      arg:
+        description: 'Optional argument (e.g. since-date YYYY-MM-DD for matrix)'
+        required: false
+        default: ''
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run report
+        env:
+          SUPABASE_URL:      https://gggozciyvjeqjnmufigp.supabase.co
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          python3 calibration_tracker.py "${{ github.event.inputs.command }}" ${{ github.event.inputs.arg }}
