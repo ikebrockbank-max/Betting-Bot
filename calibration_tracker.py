@@ -1076,7 +1076,7 @@ if __name__ == "__main__":
         params = "select=sport,stat_type,direction,confidence,result&resolved=eq.true"
         if since:
             params += f"&pick_date=gte.{since}"
-        rows = [r for r in _sb_fetch(params) if r.get("result") in ("HIT", "MISS")]
+        rows = [r for r in _sb_fetch(params) if r.get("result") in ("hit", "miss")]
         print(f"MATRIX REPORT — {len(rows)} resolved picks"
               + (f" since {since}" if since else " (all time)"))
         buckets = [(0.0, 0.50), (0.50, 0.60), (0.60, 0.65), (0.65, 0.70),
@@ -1089,7 +1089,7 @@ if __name__ == "__main__":
                     key = (r.get("sport", ""), r.get("stat_type", ""),
                            r.get("direction", ""), f"{int(lo*100)}-{int(hi*100)}")
                     h, n = cells.get(key, (0, 0))
-                    cells[key] = (h + (r["result"] == "HIT"), n + 1)
+                    cells[key] = (h + (r["result"] == "hit"), n + 1)
                     break
         MIN_N = 15   # below this a "great" rate is indistinguishable from luck
         ranked = sorted(((h / n, h, n, k) for k, (h, n) in cells.items() if n >= MIN_N),
