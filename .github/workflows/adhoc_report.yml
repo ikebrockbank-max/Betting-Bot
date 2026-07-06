@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       command:
-        description: 'calibration_tracker.py subcommand (report, matrix, calibration, status)'
+        description: 'calibration_tracker.py subcommand (report, matrix, calibration, status) or a .py script in the repo (e.g. analysis_deep.py)'
         required: false
         default: 'matrix'
       arg:
@@ -36,4 +36,9 @@ jobs:
           SUPABASE_URL:      https://gggozciyvjeqjnmufigp.supabase.co
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
-          python3 calibration_tracker.py "${{ github.event.inputs.command }}" ${{ github.event.inputs.arg }}
+          CMD="${{ github.event.inputs.command }}"
+          if [ -f "$CMD" ]; then
+            python3 "$CMD" ${{ github.event.inputs.arg }}
+          else
+            python3 calibration_tracker.py "$CMD" ${{ github.event.inputs.arg }}
+          fi
