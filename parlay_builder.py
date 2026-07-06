@@ -130,6 +130,44 @@ UNDER_EXCEPTIONS = {
 }
 MIN_HIT_RATE_UNDER_EXCEPTION = 0.60  # was 0.75 (based on stale wrong-formula 100% claim)
 
+# ── Segment gates from deep-dive analysis (analysis_deep.py, 13,452 resolved
+# picks, 2026-07-06). Each rule removes a segment with a confirmed sub-break-even
+# hit rate at n large enough to matter (break-even at -110 is 52.4%).
+
+# MLB hitter stats that the OVER segment gates apply to.
+MLB_HITTER_STATS = {
+    "Hitter Fantasy Score", "Total Bases", "Runs", "Hits",
+    "Hits+Runs+RBIs", "Singles", "Home Runs", "RBIs", "Doubles",
+}
+
+# Season hit_rate < 0.50 on hitter OVERs is confirmed bleed:
+#   HFS 416 picks @ 47.5%, Total Bases 330 @ 45.5%, Runs 183 @ 47.0%.
+# The 0.5-0.6 band is fine (HFS 794 @ 53.8%) so the floor sits at 0.50.
+MIN_HITTER_OVER_HIT_RATE = 0.50
+
+# Hitter OVERs against above-average (non-ace) pitchers lose consistently:
+#   HFS 192 @ 42.7%, Total Bases 35 @ 34.3%, H+R+RBI 61 @ 37.7%.
+# Aces are NOT blocked — HFS vs aces ran 55.6% (n=160), because lines are
+# already discounted hard for aces while "above_avg" pitchers fly under
+# the pricing radar.
+BLOCKED_PITCHER_TIERS_FOR_HITTER_OVER = {"above_avg"}
+
+# HFS OVER with a line under 4.0 is a coin flip PrizePicks prices correctly
+# (721 picks @ 45.4%; lines 6-8 run 55.2%). Low line = fringe hitter.
+MIN_HFS_OVER_LINE = 4.0
+
+# On low-line counting stats, a huge avg-vs-line edge is one blowup game
+# inflating the average, not a real signal: Runs OVER edge>100% ran 32.0%
+# (n=50), H+R+RBI 35.5% (n=110). Total Bases was fine (49.5%, n=299) so
+# the cap only applies to Runs.
+MAX_EDGE_COUNTING_STATS = {"Runs": 1.0}
+
+# WNBA singles confirmed losers at real sample sizes (all-time):
+#   Points 331 @ 45.0%, Rebounds 198 @ 41.9% (higher confidence = WORSE:
+#   Rebounds at conf 0.5-0.6 ran 30.0%). Sport-scoped so NBA (different
+#   pool, currently offseason) is untouched.
+WNBA_BLOCKED_STATS = {"Points", "Rebounds"}
+
 # Quality gates — all three must pass for a pick to enter a parlay.
 # 728-pick signal_miner dataset (2026-06-15):
 #   conf 65–70%: 47% actual (n=196) — NEGATIVE EV, confirmed dead zone
@@ -283,10 +321,14 @@ def _passes_direction_gate(p: dict) -> bool:
     - Picks in EXCLUDED_STAT_TYPES are blocked UNLESS they're in UNDER_EXCEPTIONS
       with direction=UNDER and hit_rate >= MIN_HIT_RATE_UNDER_EXCEPTION.
     - PARLAY_OVERS_ONLY blocks all UNDERs UNLESS the stat is in UNDER_EXCEPTIONS.
+    - Segment gates from the 2026-07-06 deep dive (see constants above):
+      hitter-OVER season hit_rate floor, above-avg pitcher block, HFS line
+      floor, Runs edge cap, WNBA Points/Rebounds block.
     """
     stat = p.get("stat_type", "")
     direction = p.get("direction", "OVER")
     hit_rate = p.get("hit_rate", 0.0)
+    sport = p.get("sport", "")
 
     is_under_exception = (
         stat in UNDER_EXCEPTIONS
@@ -301,6 +343,21 @@ def _passes_direction_gate(p: dict) -> bool:
     # Block UNDERs when PARLAY_OVERS_ONLY is set (except unlocked UNDERs)
     if PARLAY_OVERS_ONLY and direction != "OVER" and not is_under_exception:
         return False
+
+    if sport == "WNBA" and stat in WNBA_BLOCKED_STATS:
+        return False
+
+    if sport == "MLB" and direction == "OVER" and stat in MLB_HITTER_STATS:
+        if hit_rate < MIN_HITTER_OVER_HIT_RATE:
+            return False
+        if p.get("pitcher_tier", "") in BLOCKED_PITCHER_TIERS_FOR_HITTER_OVER:
+            return False
+        if (stat == "Hitter Fantasy Score"
+                and float(p.get("line", 0) or 0) < MIN_HFS_OVER_LINE):
+            return False
+        max_edge = MAX_EDGE_COUNTING_STATS.get(stat)
+        if max_edge is not None and (p.get("edge_pct") or 0) > max_edge:
+            return False
 
     return True
 
