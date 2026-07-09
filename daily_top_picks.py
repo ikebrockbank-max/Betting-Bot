@@ -600,8 +600,48 @@ def send_notifications(picks_by_sport: dict[str, list]):
         threading.Thread(target=_delayed, daemon=True).start()
 
 
-def run(sports: list[str] | None = None):
+# Sent-today marker lives in logs/ because the workflow persists that dir
+# via actions/cache across runs. Best-effort: if the cache misses, the worst
+# case is a duplicate send, never a missed one.
+_SENT_MARKER = Path("logs/.daily_sent.json")
+
+
+def _today_et() -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%d")
+
+
+def _already_sent_today() -> bool:
+    try:
+        import json
+        return json.loads(_SENT_MARKER.read_text()).get("date") == _today_et()
+    except Exception:
+        return False
+
+
+def _mark_sent_today():
+    try:
+        import json
+        _SENT_MARKER.parent.mkdir(exist_ok=True)
+        _SENT_MARKER.write_text(json.dumps({"date": _today_et()}))
+    except Exception as e:
+        _log(f"Could not write sent marker: {e}")
+
+
+def run(sports: list[str] | None = None, force: bool = False):
     _log("Starting daily top picks generation...")
+
+    # Retry-cron design: the workflow now fires several times a day because
+    # PrizePicks 403/429-blocks the GitHub runner IP often enough that one
+    # attempt per day means silent missed days (07-07 and 07-08 both lost).
+    # First attempt that gets lines and sends wins; later crons see the
+    # marker and exit. Alerts about failures only go out on the day's final
+    # attempt (>= 21:00 UTC) so a blocked 18:00 attempt that recovers at
+    # 19:15 never pages anyone.
+    final_attempt = datetime.now(timezone.utc).hour >= 21
+
+    if _already_sent_today() and not force:
+        _log("Picks already sent today — this is a retry slot, exiting.")
+        return True
 
     # Allows isolating a single sport for diagnosis (e.g. one scan hanging
     # near the timeout) without scanning the others. Defaults to all three.
@@ -614,35 +654,41 @@ def run(sports: list[str] | None = None):
 
     if fetch_failures:
         _log(f"PrizePicks fetch failed for: {', '.join(fetch_failures)}")
-        try:
-            from notify import send_push
-            send_push(
-                f"PrizePicks fetch failed for: {', '.join(fetch_failures)}. "
-                f"No picks could be scanned for these sports today — this is "
-                f"a blocked/rate-limited request, not a real no-games day.",
-                title="⚠️ Daily Picks: PrizePicks fetch failed",
-            )
-        except Exception as e:
-            _log(f"Failure alert push also failed: {e}")
+        if force or final_attempt:
+            try:
+                from notify import send_push
+                send_push(
+                    f"PrizePicks fetch failed for: {', '.join(fetch_failures)} "
+                    f"on every retry today — blocked/rate-limited request, "
+                    f"not a real no-games day.",
+                    title="⚠️ Daily Picks: PrizePicks fetch failed",
+                )
+            except Exception as e:
+                _log(f"Failure alert push also failed: {e}")
+        else:
+            _log("Not the final attempt — a later retry cron gets another shot.")
 
     total = sum(len(v) for v in picks_by_sport.values())
     if total == 0:
         _log("No qualified picks today — skipping notification")
-        # Still push a one-liner. A silent no-send is indistinguishable from a
-        # broken pipeline — which is how zero notifications went out for 11
-        # straight days (2026-06-25 → 07-05) before anyone noticed.
-        try:
-            from notify import send_push
-            send_push(
-                "No picks cleared the 0.60 calibrated-confidence floor today. "
-                "System ran normally.",
-                title="Daily Picks: none qualified",
-            )
-        except Exception as e:
-            _log(f"No-picks heads-up push failed: {e}")
+        # Push a one-liner on the day's last attempt. A silent no-send is
+        # indistinguishable from a broken pipeline — which is how zero
+        # notifications went out for 11 straight days (06-25 → 07-05).
+        # Skipped when the fetch failed (the alert above already covers it).
+        if (force or final_attempt) and not fetch_failures:
+            try:
+                from notify import send_push
+                send_push(
+                    "No picks cleared the 0.60 calibrated-confidence floor "
+                    "today. System ran normally.",
+                    title="Daily Picks: none qualified",
+                )
+            except Exception as e:
+                _log(f"No-picks heads-up push failed: {e}")
         return False
 
     send_notifications(picks_by_sport)
+    _mark_sent_today()
 
     # Log every sent pick to calibration tracker
     try:
@@ -662,5 +708,9 @@ if __name__ == "__main__":
     # python3 daily_top_picks.py MLB         -> single sport
     # python3 daily_top_picks.py MLB,WNBA    -> subset
     # python3 daily_top_picks.py             -> all three (default)
+    # FORCE_RESEND=true env (from workflow_dispatch force input) bypasses
+    # the sent-today dedup so manual re-runs always send.
     _arg = sys.argv[1] if len(sys.argv) > 1 else None
-    run(sports=[s.strip() for s in _arg.split(",")] if _arg else None)
+    _force = os.getenv("FORCE_RESEND", "").lower() == "true"
+    run(sports=[s.strip() for s in _arg.split(",")] if _arg else None,
+        force=_force)

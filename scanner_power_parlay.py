@@ -70,7 +70,18 @@ def _log(msg: str):
     print(f"[parlay {ts}] {msg}", flush=True)
 
 def _get_json(url: str, extra_headers: dict = None, retries: int = 3) -> dict:
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    # Full browser-like headers: PrizePicks' WAF blocks datacenter IPs
+    # (GitHub runners) far more aggressively when the request is obviously
+    # scripted. The bare "Mozilla/5.0" UA got both 2026-07-07 and -07-08
+    # scheduled scans blocked (403 MLB/NBA, 429 WNBA) — two days of silence.
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/126.0.0.0 Safari/537.36"),
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": "https://app.prizepicks.com",
+    }
     if extra_headers:
         headers.update(extra_headers)
     req = urllib.request.Request(url, headers=headers)
@@ -81,6 +92,12 @@ def _get_json(url: str, extra_headers: dict = None, retries: int = 3) -> dict:
             if e.code == 429 and attempt < retries - 1:
                 wait = 2 ** (attempt + 1)   # 2s, 4s, 8s
                 _log(f"Rate limited (429) — retrying in {wait}s (attempt {attempt + 1}/{retries})")
+                time.sleep(wait)
+            elif e.code == 403 and attempt < retries - 1:
+                # WAF blocks are often transient — a longer backoff gets
+                # through more often than an instant retry.
+                wait = 10 * (attempt + 1)   # 10s, 20s
+                _log(f"Blocked (403) — retrying in {wait}s (attempt {attempt + 1}/{retries})")
                 time.sleep(wait)
             else:
                 raise

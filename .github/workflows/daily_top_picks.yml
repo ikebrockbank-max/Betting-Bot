@@ -2,7 +2,16 @@ name: Daily Top Picks (11 AM PT)
 
 on:
   schedule:
-    - cron: '0 18 * * *'   # 11:00 AM PT (18:00 UTC) every day
+    # Retry ladder: PrizePicks 403/429-blocks GitHub runner IPs often enough
+    # that a single daily attempt means silently missed days (2026-07-07 and
+    # 07-08 were both lost to blocks). The script keeps a sent-today marker
+    # in logs/ (persisted via actions/cache), so the first attempt that gets
+    # lines sends the push and every later slot exits immediately. Failure
+    # alerts only fire from the >= 21:00 UTC slot (the day's last attempt).
+    - cron: '0 18 * * *'    # 11:00 AM PT — primary
+    - cron: '15 19 * * *'   # 12:15 PM PT — retry 1
+    - cron: '30 20 * * *'   # 1:30 PM PT — retry 2
+    - cron: '15 22 * * *'   # 3:15 PM PT — final attempt (alerts on failure)
   workflow_dispatch:        # Manual trigger from GitHub Actions UI
     inputs:
       force:
@@ -54,6 +63,8 @@ jobs:
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
           KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
           KALSHI_PRIVATE_KEY_BASE64: ${{ secrets.KALSHI_PRIVATE_KEY_BASE64 }}
+          # Bypasses the sent-today dedup marker so manual re-runs always send
+          FORCE_RESEND: ${{ github.event.inputs.force }}
         run: |
           python3 daily_top_picks.py "${{ github.event.inputs.sports }}"
 
