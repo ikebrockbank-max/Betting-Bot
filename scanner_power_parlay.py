@@ -104,6 +104,39 @@ def _get_json(url: str, extra_headers: dict = None, retries: int = 3) -> dict:
     raise RuntimeError("_get_json: exhausted retries")
 
 
+def _get_pp_json(url: str, extra_headers: dict = None) -> dict:
+    """
+    PrizePicks fetch with partner-API fallback.
+
+    api.prizepicks.com sits behind TLS-fingerprinting bot protection that
+    403/429-blocks python/curl clients regardless of headers (confirmed
+    2026-07-11: blocked from BOTH GitHub runners and a residential IP —
+    took out 07-07 through 07-11). partner-api.prizepicks.com serves the
+    identical JSON:API payload and returned 200 from the same blocked IP,
+    so any 403/429 on the main host retries there before giving up.
+    """
+    try:
+        return _get_json(url, extra_headers)
+    except urllib.error.HTTPError as e:
+        if e.code not in (403, 429) or "api.prizepicks.com" not in url:
+            raise
+        alt = url.replace("api.prizepicks.com", "partner-api.prizepicks.com")
+        _log(f"PP main API blocked ({e.code}) — falling back to partner-api")
+        # partner-api rate-limits back-to-back requests hard (confirmed: two
+        # requests seconds apart -> 429, same request after ~10s -> 200), and
+        # by this point several attempts just burned on the main host.
+        # Space the attempts out instead of the 2s/4s ladder _get_json uses.
+        last_err = None
+        for attempt in range(3):
+            time.sleep(12)
+            try:
+                return _get_json(alt, extra_headers, retries=1)
+            except urllib.error.HTTPError as e2:
+                last_err = e2
+                _log(f"partner-api attempt {attempt + 1}/3 failed ({e2.code})")
+        raise last_err
+
+
 # Process-level raw API response cache.
 # fetch_standard_lines populates this; fetch_typed_lines reads from it
 # to avoid duplicate API calls that trigger 429 rate limits.
@@ -206,7 +239,7 @@ def fetch_standard_lines(sports: list[str] = None, days_ahead: int = 1) -> list[
         try:
             url = (f"https://api.prizepicks.com/projections"
                    f"?league_id={lid}&per_page=500&single_stat=true&state_code=AZ")
-            data = _get_json(url, {"Referer": "https://app.prizepicks.com/"})
+            data = _get_pp_json(url, {"Referer": "https://app.prizepicks.com/"})
             # Cache raw response so fetch_typed_lines can reuse it without
             # making a second API call (which triggers 429 rate limits).
             _pp_raw_cache[(sport, today_str)] = data
@@ -308,7 +341,7 @@ def fetch_typed_lines(sports: list[str], odds_type: str) -> list[dict]:
             else:
                 url = (f"https://api.prizepicks.com/projections"
                        f"?league_id={lid}&per_page=500&single_stat=true&state_code=AZ")
-                data = _get_json(url, {"Referer": "https://app.prizepicks.com/"})
+                data = _get_pp_json(url, {"Referer": "https://app.prizepicks.com/"})
                 _pp_raw_cache[(sport, today_str)] = data
             players = {
                 p["id"]: p["attributes"].get("name", "?")
