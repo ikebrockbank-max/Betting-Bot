@@ -59,6 +59,54 @@ def _is_elite(p: dict) -> bool:
     return False
 
 
+def _find_locks(n: int = 3) -> list[dict]:
+    """
+    🔒 Lock tier: goblin (reduced-line) MLB picks where the model's own
+    probability AND the season record over the easier line both clear a
+    high bar. Standard lines are priced ~50/50 by PrizePicks, so the honest
+    ceiling there is ~60% (measured: elite tier 57.6% on n=288). A ~75%
+    hit rate is only achievable on goblin lines — PP compensates with a
+    lower flex payout, so these are volume/consistency picks, not value
+    bombs. Filters: gate stats only, model p_over >= 0.75, season hit rate
+    over the goblin line >= 0.80.
+
+    Logged to pick_log with a " (Goblin)" stat suffix so they never collide
+    with a same-day standard pick (unique key: date+player+stat) and their
+    calibration accrues separately. update_results strips the suffix for
+    box-score lookup.
+    """
+    import scanner_power_parlay as s
+    from parlay_builder import EXCLUDED_STAT_TYPES
+    try:
+        glines = s.fetch_typed_lines(["MLB"], "goblin")
+    except Exception as e:
+        _log(f"Goblin fetch failed (non-fatal): {e}")
+        return []
+    locks = []
+    for pick in glines:
+        if pick.get("stat_type") in EXCLUDED_STAT_TYPES:
+            continue
+        stats = s.get_stats_for_pick(pick)
+        if not stats:
+            continue
+        r = s.score_pick(stats, pick)
+        if r.get("skip_reason") or r.get("direction") != "OVER":
+            continue
+        if (r.get("p_over") or 0) >= 0.75 and (r.get("hit_rate") or 0) >= 0.80:
+            locks.append(r)
+        time.sleep(0.02)
+    locks.sort(key=lambda x: x.get("p_over", 0), reverse=True)
+    seen, out = set(), []
+    for p in locks:
+        if p["player"] not in seen:
+            seen.add(p["player"])
+            p["stat_type"] = f"{p['stat_type']} (Goblin)"
+            out.append(p)
+        if len(out) >= n:
+            break
+    return out
+
+
 def _mlb_trust_score(p: dict) -> float:
     stat = p.get("stat_type")
     conf = p.get("confidence", 0)
@@ -651,6 +699,15 @@ def run(sports: list[str] | None = None, force: bool = False):
     # n=4: user takes 1-4 picks/day; elite tier produces ~4-6/day and sorts
     # to the top, so 4 slots ≈ the starred picks plus minimal filler.
     picks_by_sport, fetch_failures = get_top_picks(sports_to_scan, n=4)
+
+    # 🔒 Lock tier (goblin lines, targeted ~75% hit rate) — MLB only.
+    # Reuses the raw PP response cached by the standard fetch, so no extra
+    # API call. Shown as its own section in the push.
+    if "MLB" in sports_to_scan and picks_by_sport.get("MLB"):
+        locks = _find_locks(n=3)
+        if locks:
+            picks_by_sport["MLB 🔒 Locks"] = locks
+            _log(f"Locks: {len(locks)} goblin picks at p_over>=0.75, hr>=0.80")
 
     if fetch_failures:
         _log(f"PrizePicks fetch failed for: {', '.join(fetch_failures)}")

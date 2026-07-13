@@ -558,7 +558,11 @@ def update_results(target_date: str = None):
     for e in pending:
         sport  = e["sport"]
         player = e["player"]
-        stat   = e["stat_type"]
+        # Goblin-line lock picks are logged with a " (Goblin)" stat suffix so
+        # they don't collide with a same-day standard pick on the pick_log
+        # unique key (pick_date, player, stat_type) — strip it for the
+        # box-score lookup, which only knows real stat names.
+        stat   = e["stat_type"].replace(" (Goblin)", "")
 
         actual = None
         if sport == "WNBA":
