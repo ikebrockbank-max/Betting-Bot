@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from data.nba_stats  import get_player_stats as nba_get_stats
 from data.injuries   import get_injury_report
-from notify          import send_push, send_email
+from notify          import send_push, send_email, send_discord
 
 # ── Optional context modules (all fail gracefully) ─────────────────────────────
 try:
@@ -1367,6 +1367,26 @@ def run_now(games: list[dict], sport: str = "NBA"):
     )
     _log(f"[{sport}] {len(all_picks)} picks above {int(MIN_PICK_PROB*100)}% threshold")
 
+    # Shared stat/direction policy from parlay_builder — this report predates
+    # the empirical gates and was still pushing confirmed-loser stat types
+    # (WNBA Points 45.0%, Rebounds 41.9%, MLB Singles/Ks/Walks/H+R+RBI all
+    # sub-break-even; caught when an ungated WNBA pick hit the user's phone
+    # 2026-07-12). Same rules as _passes_direction_gate minus the MLB
+    # hitter-segment gates, whose inputs (season hit_rate, pitcher_tier,
+    # edge_pct) this legacy scoring pipeline doesn't produce.
+    from parlay_builder import (EXCLUDED_STAT_TYPES, WNBA_BLOCKED_STATS,
+                                PARLAY_OVERS_ONLY, UNDER_EXCEPTIONS)
+    _pre_gate = len(all_picks)
+    all_picks = [
+        p for p in all_picks
+        if p["stat_type"] not in EXCLUDED_STAT_TYPES
+        and not (sport == "WNBA" and p["stat_type"] in WNBA_BLOCKED_STATS)
+        and not (PARLAY_OVERS_ONLY and p["direction"] != "OVER"
+                 and p["stat_type"] not in UNDER_EXCEPTIONS)
+    ]
+    if len(all_picks) != _pre_gate:
+        _log(f"[{sport}] Direction/stat gate: {_pre_gate} → {len(all_picks)} picks")
+
     if not all_picks:
         _log(f"[{sport}] No qualifying picks — skipping email")
         return
@@ -1410,6 +1430,27 @@ def run_now(games: list[dict], sport: str = "NBA"):
         _log(f"[{sport}] Email sent: {subject}")
     else:
         _log(f"[{sport}] Email FAILED to send: {subject}")
+
+    # ── Discord: post to premium channel immediately, free channel 60 min later ──
+    discord_title = f"{emoji} {sport} Mispriced Lines — {games[0]['name']}"
+    top_discord_picks = sorted(all_picks, key=lambda x: x["prob"], reverse=True)[:8]
+    # Add sport key to each pick so the embed shows it
+    for pk in top_discord_picks:
+        pk.setdefault("sport", sport)
+
+    # Premium alert (real-time) — goes to paid subscribers right now
+    discord_ok = send_discord(discord_title, top_discord_picks, sport=sport, tier="premium")
+    if discord_ok:
+        _log(f"[{sport}] Discord premium alert sent")
+
+    # Free alert (delayed 60 min) — schedule via a background thread so we don't block
+    import threading
+    def _delayed_free_post():
+        import time as _t
+        _t.sleep(3600)  # 60-minute delay for free channel
+        send_discord(discord_title, top_discord_picks, sport=sport, tier="free")
+        _log(f"[{sport}] Discord free alert sent (60-min delay)")
+    threading.Thread(target=_delayed_free_post, daemon=True).start()
 
 
 def run(force: bool = False):
