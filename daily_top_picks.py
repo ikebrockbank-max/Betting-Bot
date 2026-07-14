@@ -709,6 +709,28 @@ def run(sports: list[str] | None = None, force: bool = False):
             picks_by_sport["MLB 🔒 Locks"] = locks
             _log(f"Locks: {len(locks)} goblin picks at p_over>=0.75, hr>=0.80")
 
+    # An empty PP board during a league break looks identical to a blocked
+    # fetch (both end in "no lines"), and during the 2026 All-Star break the
+    # user got alarming "fetch failed" alerts on days with zero games to bet.
+    # If MLB was scanned and the league schedule shows no regular-season games
+    # today, treat MLB as a legitimate off day, not a failure.
+    if "MLB" in fetch_failures:
+        try:
+            import json as _json
+            import urllib.request as _rq
+            _today = _today_et()
+            _sched = _json.loads(_rq.urlopen(
+                f"https://statsapi.mlb.com/api/v1/schedule?sportId=1"
+                f"&startDate={_today}&endDate={_today}", timeout=10).read())
+            _reg = [g for d in _sched.get("dates", []) for g in d["games"]
+                    if g.get("gameType") == "R"]
+            if not _reg:
+                _log("MLB has no regular-season games today (off day / "
+                     "All-Star break) — not a fetch failure.")
+                fetch_failures = [s for s in fetch_failures if s != "MLB"]
+        except Exception as e:
+            _log(f"MLB schedule check failed (treating as fetch failure): {e}")
+
     if fetch_failures:
         _log(f"PrizePicks fetch failed for: {', '.join(fetch_failures)}")
         if force or final_attempt:

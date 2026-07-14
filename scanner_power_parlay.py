@@ -128,7 +128,10 @@ def _get_pp_json(url: str, extra_headers: dict = None) -> dict:
         # Space the attempts out instead of the 2s/4s ladder _get_json uses.
         last_err = None
         for attempt in range(3):
-            time.sleep(12)
+            # 20s/40s/60s: 12s spacing still 429'd on all three attempts from
+            # GitHub runners (2026-07-13) — their shared egress IPs carry
+            # traffic from every other scheduled scanner in this repo too.
+            time.sleep(20 * (attempt + 1))
             try:
                 return _get_json(alt, extra_headers, retries=1)
             except urllib.error.HTTPError as e2:
