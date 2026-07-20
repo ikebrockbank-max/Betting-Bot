@@ -1749,16 +1749,12 @@ def score_pick(stats: dict, pick: dict) -> dict:
             if _st_adj != 0.0:
                 confidence = round(min(0.95, max(0.35, confidence + _st_adj)), 3)
 
-    # ── Pitcher Fantasy Score boost (both directions) ─────────────────────────
-    # Applied outside the OVER-only block — PFS UNDER is equally strong.
-    # Clean post-formula-fix data (56 picks, June 25-28):
-    #   OVER:  64.0% (16/25) — best MLB OVER category by wide margin
-    #   UNDER: 67.7% (21/31) — best MLB UNDER category
-    #   Total: 66.1% (37/56) — #1 category overall, 14 pts above break-even
-    # The +0.02 corrects for PFS OVER also receiving the generic MLB -0.03 haircut
-    # above, which was calibrated on all MLB picks before PFS was properly scored.
-    if sport == "MLB" and stat_type == "Pitcher Fantasy Score":
-        confidence = round(min(0.95, max(0.35, confidence + 0.02)), 3)
+    # PFS boost REMOVED (2026-07-20). The +0.02 was justified by one hot
+    # post-formula-fix week (66.1%, 56 picks, June 25-28). Full-sample truth:
+    # OVER 54.2% (n=238-ish), UNDER ~48-51%, and OVER went 1/7 right after
+    # the All-Star break (pitch-count-capped first starts the model can't
+    # see). The boost was actively harmful: it ranked PFS above stronger
+    # HFS picks — 2026-07-19's top-4 was three PFS OVERs, 0/4 day.
 
     # ── Probability distribution engine ──────────────────────────────────────────
     # Model the stat as normally distributed around the projection.

@@ -34,29 +34,24 @@ def _log(msg):
 # toward the categories with the best track record (14-day review, 2026-06-18).
 def _is_elite(p: dict) -> bool:
     """
-    Elite tier — the picks worth actually betting. Backtested on 3,974
-    gate-passing resolved picks over 27 active days (analysis_elite.py,
-    2026-07-06):
-      conf >= 0.75 (calibrated):              60.5% (75/124), ~4.6/day
-      HFS OVER line>=6, season hr>=0.7,
-        pitcher tier known & not above_avg:   56.4% (66/117), ~4.3/day
-      PFS OVER line 12-25, season hr .6-.8:   58.8% (20/34),  ~1.3/day
-    Elites sort above everything else so a 1-4 picks/day user can take
-    just the starred picks.
+    Elite tier v2 (2026-07-20) — the picks worth actually betting.
+
+    Definition: HFS OVER, line 6.0-7.5, model p_over >= 0.75.
+    Backtest (analysis_elite_v2.py, 5,090 gated MLB picks, 35 days):
+    60.2% (53/88), ~2.5/day, and — critically — stable across eras:
+    58% June, 62% July. Every rejected candidate failed the era split:
+      - v1 elite (conf>=0.75 / HFS hr-based / PFS prime): 61% June -> 50% July
+      - confidence floors as elite signal: 46-47% BOTH eras (conf is
+        calibration-era-dependent; the model's own p_over is the signal)
+      - p_over 0.70-0.75 band: 50% — the bar is 0.75, not "high-ish"
+      - lines 8+: 33% (n=12); superstar lines are priced too tight
+    PFS dropped from elite entirely: OVER ran 1/7 post All-Star break
+    (pitch-count regime) and its era-split was already decaying.
     """
-    if p.get("confidence", 0) >= 0.75:
-        return True
-    stat = p.get("stat_type", "")
-    hr = p.get("hit_rate", 0) or 0
-    line = float(p.get("line", 0) or 0)
-    if (stat == "Hitter Fantasy Score" and p.get("direction") == "OVER"
-            and line >= 6.0 and hr >= 0.7
-            and p.get("pitcher_tier", "") in ("weak", "below_avg", "average", "ace")):
-        return True
-    if (stat == "Pitcher Fantasy Score" and p.get("direction") == "OVER"
-            and 12 <= line <= 25 and 0.6 <= hr < 0.8):
-        return True
-    return False
+    return (p.get("stat_type") == "Hitter Fantasy Score"
+            and p.get("direction") == "OVER"
+            and 6.0 <= float(p.get("line", 0) or 0) <= 7.5
+            and (p.get("p_over") or 0) >= 0.75)
 
 
 def _find_locks(n: int = 3) -> list[dict]:
