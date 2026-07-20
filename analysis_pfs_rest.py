@@ -2,10 +2,10 @@
 post-IL) a systematic PFS OVER killer via pitch-count limits?"""
 from calibration_tracker import _sb_fetch
 
-rows = _sb_fetch("select=rest_days,result,direction,pick_date"
-                 "&stat_type=eq.Pitcher Fantasy Score&resolved=eq.true"
-                 "&result=neq.void")
-rows = [r for r in rows if r.get("result") in ("hit", "miss")]
+rows = _sb_fetch("select=rest_days,result,direction,pick_date,stat_type"
+                 "&resolved=eq.true&result=neq.void")
+rows = [r for r in rows if r.get("result") in ("hit", "miss")
+        and r.get("stat_type") == "Pitcher Fantasy Score"]
 for d in ("OVER", "UNDER"):
     seg = [r for r in rows if r["direction"] == d]
     print(f"PFS {d} (n={len(seg)}):")
