@@ -560,9 +560,14 @@ def update_results(target_date: str = None):
         player = e["player"]
         # Goblin-line lock picks are logged with a " (Goblin)" stat suffix so
         # they don't collide with a same-day standard pick on the pick_log
-        # unique key (pick_date, player, stat_type) — strip it for the
-        # box-score lookup, which only knows real stat names.
-        stat   = e["stat_type"].replace(" (Goblin)", "")
+        # unique key (pick_date, player, stat_type). `stat` (stripped) is for
+        # the box-score lookup, which only knows real stat names; `stat_key`
+        # (as stored) is for row updates and local matching — patching with
+        # the stripped name matches no row, which left every goblin pick
+        # permanently unresolved (caught live 2026-07-19: 3-day-old locks
+        # still pending).
+        stat_key = e["stat_type"]
+        stat     = stat_key.replace(" (Goblin)", "")
 
         actual = None
         if sport == "WNBA":
@@ -586,12 +591,12 @@ def update_results(target_date: str = None):
             print(f"  ⬜ VOID (DNP) {player} {e['direction']} {e['line']} {stat}")
 
             if _sb_available():
-                _sb_patch(target_date, player, stat, updates)
+                _sb_patch(target_date, player, stat_key, updates)
                 e.update(updates)
             else:
                 for entry in all_entries:
                     if (entry.get("player") == player
-                            and entry.get("stat_type") == stat
+                            and entry.get("stat_type") == stat_key
                             and entry.get("pick_date") == target_date):
                         entry.update(updates)
                         break
@@ -616,13 +621,13 @@ def update_results(target_date: str = None):
                   + (f" (proj={proj}, err={proj_err:+.1f})" if proj_err is not None else ""))
 
             if _sb_available():
-                _sb_patch(target_date, player, stat, updates)
+                _sb_patch(target_date, player, stat_key, updates)
                 e.update(updates)   # Mirror into local dict so notification has real results
             else:
                 # Update local entry
                 for entry in all_entries:
                     if (entry.get("player") == player
-                            and entry.get("stat_type") == stat
+                            and entry.get("stat_type") == stat_key
                             and entry.get("pick_date") == target_date):
                         entry.update(updates)
                         break
