@@ -15,10 +15,11 @@ from data.mlb_batter_stats import find_player_id, compute_hitter_fs
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else "dry"
 
-rows = _sb_fetch("select=pick_date,player,line,direction,result,actual_value"
-                 "&sport=eq.MLB&stat_type=eq.Hitter Fantasy Score"
+rows = _sb_fetch("select=pick_date,player,line,direction,result,actual_value,stat_type,sport"
                  "&resolved=eq.true&result=neq.void")
-rows = [r for r in rows if r.get("result") in ("hit", "miss")]
+rows = [r for r in rows if r.get("result") in ("hit", "miss")
+        and r.get("sport") == "MLB"
+        and r.get("stat_type") == "Hitter Fantasy Score"]
 print(f"Re-grading {len(rows)} resolved HFS picks (mode={MODE})")
 
 _log_cache = {}
