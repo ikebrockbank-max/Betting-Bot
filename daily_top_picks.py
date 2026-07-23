@@ -34,23 +34,30 @@ def _log(msg):
 # toward the categories with the best track record (14-day review, 2026-06-18).
 def _is_elite(p: dict) -> bool:
     """
-    Elite tier v2 (2026-07-20) — the picks worth actually betting.
+    Elite tier — HFS OVER, model p_over >= 0.75, line in the sweet-spot
+    window. The tier survives honest grading: after the 2026-07-24 HFS
+    formula fix + re-grade of 5,767 historical picks, it still hit 60.2%
+    (59/98) vs the corrected overall-HFS baseline of just 49.5% — so the
+    gate is doing real work separating ~60% picks from a below-break-even
+    category.
 
-    Definition: HFS OVER, line 6.0-7.5, model p_over >= 0.75.
-    Backtest (analysis_elite_v2.py, 5,090 gated MLB picks, 35 days):
-    60.2% (53/88), ~2.5/day, and — critically — stable across eras:
-    58% June, 62% July. Every rejected candidate failed the era split:
-      - v1 elite (conf>=0.75 / HFS hr-based / PFS prime): 61% June -> 50% July
-      - confidence floors as elite signal: 46-47% BOTH eras (conf is
-        calibration-era-dependent; the model's own p_over is the signal)
-      - p_over 0.70-0.75 band: 50% — the bar is 0.75, not "high-ish"
-      - lines 8+: 33% (n=12); superstar lines are priced too tight
-    PFS dropped from elite entirely: OVER ran 1/7 post All-Star break
-    (pitch-count regime) and its era-split was already decaying.
+    LINE WINDOW recalibrated 2026-07-24. The old 6.0-7.5 window was tuned
+    on the inflated DK-style formula. Correct PrizePicks scores run ~18%
+    lower, so the same-quality picks now surface at ~4.5-6.0 (verified on
+    the 07-24 board: the high-p_over HFS picks clustered at 4.5-5.0 and
+    zero cleared the old 6.0 floor). This is an interim scale-adjustment,
+    not a fresh validation — the stored historical p_over was computed with
+    the old formula, so the window can only be re-derived cleanly after
+    ~2 weeks of corrected-formula picks accumulate. Upper bound 6.5 keeps
+    out the priced-too-tight superstar lines (old 8+ ran 33%).
+
+    p_over is a ranking signal, NOT a win probability — the tier realizes
+    ~60% while individual picks are labeled 0.75-0.81. Never quote p_over
+    to the user as a per-pick percentage.
     """
     return (p.get("stat_type") == "Hitter Fantasy Score"
             and p.get("direction") == "OVER"
-            and 6.0 <= float(p.get("line", 0) or 0) <= 7.5
+            and 4.5 <= float(p.get("line", 0) or 0) <= 6.5
             and (p.get("p_over") or 0) >= 0.75)
 
 
