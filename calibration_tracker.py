@@ -1020,26 +1020,18 @@ def _fetch_actual_mlb(player: str, stat_type: str, target_date: str):
                     hr = st.get("homeRuns") or 0
                     return max(0, h - d - t - hr)
 
-                # ── Hitter Fantasy Score (PrizePicks official formula) ─────────
-                # 1B×3 + 2B×6 + 3B×9 + HR×12 + RBI×3.5 + R×3.5
-                # + BB×3 + HBP×3 + SB×6 - K×1
+                # ── Hitter Fantasy Score ────────────────────────────────────
+                # Grade with the SAME function the scanner projects with, so
+                # picks and results live on one scale — the PrizePicks scale.
+                # This block previously used a THIRD formula (HR×12, 2B×6,
+                # RBI×3.5, R×3.5, -K×1) that matched neither the scanner nor
+                # PrizePicks; anchor Caminero 7/22 (2 singles, 1 run) it gave
+                # 9.5, PrizePicks showed 8. Every pre-2026-07-24 HFS grade
+                # used it and is unreliable — re-grade before trusting old
+                # HFS hit-rates.
                 if stat_type == "Hitter Fantasy Score":
-                    h   = st.get("hits") or 0
-                    d   = st.get("doubles") or 0
-                    t   = st.get("triples") or 0
-                    hr  = st.get("homeRuns") or 0
-                    singles = max(0, h - d - t - hr)
-                    rbi = st.get("rbi") or 0
-                    r   = st.get("runs") or 0
-                    bb  = st.get("baseOnBalls") or 0
-                    hbp = st.get("hitByPitch") or 0
-                    sb  = st.get("stolenBases") or 0
-                    ks  = st.get("strikeOuts") or 0
-                    score = (singles * 3.0 + d * 6.0 + t * 9.0 + hr * 12.0
-                             + rbi * 3.5 + r * 3.5
-                             + bb * 3.0 + hbp * 3.0 + sb * 6.0
-                             - ks * 1.0)
-                    return round(score, 2)
+                    from data.mlb_batter_stats import compute_hitter_fs
+                    return round(compute_hitter_fs(st), 2)
 
         # Only conclude DNP when no split matched target_date at all. If a
         # split DID match but fell through here, that means stat_type isn't

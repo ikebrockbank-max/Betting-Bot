@@ -73,8 +73,17 @@ def _normalize(name: str) -> str:
 
 def compute_hitter_fs(s: dict) -> float:
     """
-    DraftKings-style MLB Hitter Fantasy Score.
-    Confirmed against PP lines (Trea Turner avg 7.0 vs line 6.5).
+    PrizePicks MLB Hitter Fantasy Score — official PrizePicks weights.
+
+    Single 3, Double 5, Triple 8, Home Run 10, Run 2, RBI 2, Walk 2,
+    HBP 2, Stolen Base 5.
+
+    The old formula was DraftKings-style (Run 3.2, RBI 3.5, Walk 3, SB 6),
+    which inflated every score vs PrizePicks' own board and, because the
+    LINE is set in PrizePicks units, made our clear-rates and projected
+    means systematically too high. Caught 2026-07-24: Caminero 7/22 went
+    2 singles + 1 run; PrizePicks scored it 8, the DK formula scored 9.2.
+    Verify: 2*3 + 1*2 = 8. A solo HR = 10 + 2(run) + 2(rbi) = 14 (was 16.7).
     """
     h   = int(s.get("hits", 0) or 0)
     d   = int(s.get("doubles", 0) or 0)
@@ -83,9 +92,10 @@ def compute_hitter_fs(s: dict) -> float:
     r   = int(s.get("runs", 0) or 0)
     rbi = int(s.get("rbi", 0) or 0)
     bb  = int(s.get("baseOnBalls", 0) or 0)
+    hbp = int(s.get("hitByPitch", 0) or 0)
     sb  = int(s.get("stolenBases", 0) or 0)
     sg  = max(0, h - d - t - hr)   # singles
-    return sg*3 + d*5 + t*8 + hr*10 + rbi*3.5 + r*3.2 + bb*3 + sb*6
+    return sg*3 + d*5 + t*8 + hr*10 + r*2 + rbi*2 + bb*2 + hbp*2 + sb*5
 
 def compute_pitcher_fs(s: dict) -> float:
     """
