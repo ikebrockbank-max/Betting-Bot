@@ -1,0 +1,34 @@
+name: Daily Scorecard (8 AM)
+
+# Grades yesterday's picks on the corrected PrizePicks scale and pushes
+# a summary via ntfy. 8 AM local (MDT = 14:00 UTC). Grades live from box
+# scores, so it does not depend on the resolver having run first.
+
+on:
+  schedule:
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Date to grade YYYY-MM-DD (blank = yesterday)'
+        required: false
+        default: ''
+
+jobs:
+  scorecard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Push daily scorecard
+        env:
+          SUPABASE_URL:      https://gggozciyvjeqjnmufigp.supabase.co
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
+        run: |
+          python3 daily_scorecard.py "${{ github.event.inputs.date }}"
