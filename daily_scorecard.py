@@ -31,10 +31,17 @@ def run(date=None):
     if date is None:
         date = (datetime.now(timezone.utc) - timedelta(hours=4)
                 - timedelta(days=1)).strftime("%Y-%m-%d")
+    # hit_rate/pitcher_tier/edge_pct are required by _passes_direction_gate —
+    # omitting them silently fails the gate for most hitter OVERs and craters
+    # the 'gate' bucket (caught 2026-07-24: reported 4/6 instead of 38/74).
     rows = _sb_fetch(f"select=player,sport,stat_type,direction,line,confidence,"
-                     f"p_over,result,pick_date&pick_date=eq.{date}")
+                     f"p_over,hit_rate,pitcher_tier,edge_pct,result,pick_date"
+                     f"&pick_date=eq.{date}")
     for r in rows:
         r["line"] = _f(r, "line")
+        r["hit_rate"] = _f(r, "hit_rate")
+        r["edge_pct"] = _f(r, "edge_pct")
+        r["pitcher_tier"] = r.get("pitcher_tier") or ""
 
     def grade(r):
         if r.get("sport") == "MLB":
