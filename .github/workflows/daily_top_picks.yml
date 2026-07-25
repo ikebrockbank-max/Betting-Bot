@@ -12,7 +12,7 @@ on:
     # a blocked morning AND re-fire past the afternoon lineup lock so any
     # morning pick on a since-scratched hitter can still be superseded — the
     # sent marker resets are handled by the run() force/final logic.
-    - cron: '30 14 * * *'   # 8:30 AM MDT — morning push (primary)
+    - cron: '0 15 * * *'    # 9:00 AM MDT — morning push (primary)
     - cron: '0 18 * * *'    # 12:00 PM MDT — retry / lineup-confirmed refresh
     - cron: '30 20 * * *'   # 2:30 PM MDT — retry 2
     - cron: '15 22 * * *'   # 4:15 PM MDT — final attempt (alerts on failure)
