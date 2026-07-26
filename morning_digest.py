@@ -83,6 +83,12 @@ def build_digest():
     if fetch_failures:
         lines.append(f"\n⚠️ fetch issue: {', '.join(fetch_failures)}")
 
+    # PrizePicks moves lines through the day — a pick flagged at 4.5 this
+    # morning can be 5 by game time, which changes the odds. Always confirm
+    # the live line in the app before betting.
+    hhmm = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    lines.append(f"\n⏰ lines as of {hhmm} — confirm live line in app")
+
     body = "\n".join(lines)
 
     # Log today's picks (+locks) so tomorrow's scorecard can grade them.
