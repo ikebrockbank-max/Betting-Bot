@@ -207,6 +207,29 @@ def find_player_id(player_name: str) -> str | None:
     return None
 
 
+def get_player_team_id(player_name: str) -> int | None:
+    """Player's current MLB team id, cached. Used to match a batter to today's
+    game by TEAM when the lineup isn't posted yet — probable pitchers are known
+    days ahead, lineups only hours ahead, so team-matching massively improves
+    opposing-pitcher coverage on morning scans."""
+    pid = find_player_id(player_name)
+    if not pid:
+        return None
+    cached = _load(f"mlb_team_{pid}", ttl=86400)
+    if cached:
+        return cached.get("team_id")
+    try:
+        url = f"https://statsapi.mlb.com/api/v1/people/{pid}?hydrate=currentTeam"
+        data = _get(url)
+        people = data.get("people", [])
+        tid = people[0].get("currentTeam", {}).get("id") if people else None
+        if tid:
+            _save(f"mlb_team_{pid}", {"team_id": tid})
+        return tid
+    except Exception:
+        return None
+
+
 # ── Game log pull ──────────────────────────────────────────────────────────────
 
 def get_player_game_log(player_name: str, stat_type: str) -> list[dict]:
@@ -401,6 +424,29 @@ def _find_player_game(player_name: str) -> dict | None:
                         "ump_name": g.get("ump_name",""), "is_home": True,
                         "batting_order": order,
                         "player_team": g.get("home_name", "")}
+
+    # Fallback: batter not found in any posted lineup (common on morning scans
+    # before lineups drop). Match by the player's TEAM so we still get the
+    # opposing probable pitcher — batting_order stays None since the lineup
+    # isn't out yet. This is what lifts pitcher-context coverage from ~50%
+    # (lineup-dependent) toward the ~100% of games that have probable pitchers.
+    team_id = get_player_team_id(player_name)
+    if team_id:
+        for g in schedule:
+            if team_id == g.get("home_id"):
+                return {"opp_id": g["away_id"], "opp_name": g["away_name"],
+                        "opp_pitcher": g["away_pitcher"],
+                        "opp_pitcher_id": g.get("away_pitcher_id"),
+                        "home_name": g["home_name"], "home_id": g["home_id"],
+                        "ump_name": g.get("ump_name", ""), "is_home": True,
+                        "player_team": g.get("home_name", "")}
+            if team_id == g.get("away_id"):
+                return {"opp_id": g["home_id"], "opp_name": g["home_name"],
+                        "opp_pitcher": g["home_pitcher"],
+                        "opp_pitcher_id": g.get("home_pitcher_id"),
+                        "home_name": g["home_name"], "home_id": g["home_id"],
+                        "ump_name": g.get("ump_name", ""), "is_home": False,
+                        "player_team": g.get("away_name", "")}
     return None
 
 def get_player_stats(player_name: str, stat_type: str, line: float,
