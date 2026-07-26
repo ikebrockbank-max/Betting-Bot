@@ -27,7 +27,10 @@ def _is_lock(r):
     return "(Goblin)" in (r.get("stat_type") or "")
 
 
-def run(date=None):
+def build_scorecard(date=None) -> str:
+    """Grade `date` (default yesterday ET) and return the scorecard body
+    text. No push — the caller decides how to deliver it (used standalone
+    and folded into the combined morning digest)."""
     if date is None:
         date = (datetime.now(timezone.utc) - timedelta(hours=4)
                 - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -81,18 +84,22 @@ def run(date=None):
         if ln:
             parts.append(ln)
     if star_detail:
-        misses = [n for n, h in star_detail if not h]
         hits = [n for n, h in star_detail if h]
+        misses = [n for n, h in star_detail if not h]
         if hits:
             parts.append("✅ " + ", ".join(hits))
         if misses:
             parts.append("❌ " + ", ".join(misses))
-    body = "\n".join(parts)
-    print(body)
+    return "\n".join(parts)
 
+
+def run(date=None):
+    body = build_scorecard(date)
+    print(body)
+    label = (date or "")[5:] or "yesterday"
     try:
         from notify import send_push
-        send_push(body, title=f"📊 Daily Scorecard {date[5:]}")
+        send_push(body, title=f"📊 Daily Scorecard {label}")
         print("\n[pushed via ntfy]")
     except Exception as e:
         print(f"\n[push failed: {e}]")

@@ -1,0 +1,54 @@
+name: Morning Brief (9 AM)
+
+# ONE combined push: yesterday's scorecard + today's picks + today's locks.
+# Replaces the separate scorecard/picks morning pushes so the user gets a
+# single notification with everything (they were seeing a bare "Scorecard"
+# with no picks). Retry ladder + sent-today marker: first slot that gets
+# picks sends and marks; later slots exit. 9 AM MDT primary.
+
+on:
+  schedule:
+    - cron: '0 15 * * *'    # 9:00 AM MDT — primary
+    - cron: '30 16 * * *'   # 10:30 AM MDT — retry 1
+    - cron: '0 18 * * *'    # 12:00 PM MDT — retry 2 (lineups firmer)
+    - cron: '0 20 * * *'    # 2:00 PM MDT — final retry
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force resend even if already sent today'
+        required: false
+        default: 'false'
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Restore sent-marker cache
+        uses: actions/cache@v4
+        with:
+          path: logs/
+          key: digest-state-${{ github.run_id }}
+          restore-keys: |
+            digest-state-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Send morning brief
+        env:
+          SUPABASE_URL:      https://gggozciyvjeqjnmufigp.supabase.co
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
+          ODDS_API_KEY:      ${{ secrets.ODDS_API_KEY }}
+          OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+          FORCE_RESEND:      ${{ github.event.inputs.force }}
+        run: python3 morning_digest.py
+      - name: Save sent-marker cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: logs/
+          key: digest-state-${{ github.run_id }}

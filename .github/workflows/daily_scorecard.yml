@@ -5,8 +5,8 @@ name: Daily Scorecard (8 AM)
 # scores, so it does not depend on the resolver having run first.
 
 on:
-  schedule:
-    - cron: '0 14 * * *'
+  # Scheduled push folded into morning_digest.yml (one combined brief).
+  # Kept for manual dispatch / ad-hoc date grading.
   workflow_dispatch:
     inputs:
       date:
