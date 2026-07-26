@@ -61,6 +61,25 @@ def _is_elite(p: dict) -> bool:
             and (p.get("p_over") or 0) >= 0.75)
 
 
+def _is_prime(p: dict) -> bool:
+    """
+    🎯 Prime — the highest-hit-rate slice WITHIN the star tier, from the
+    sub-slice analysis (analysis_star_slices.py, 307 stars, 2026-07-26):
+      • p_over 0.80-0.85: 60.2% — the sweet spot. 0.85+ REGRESSES to 45.5%
+        (model overconfidence at the extreme), so this is a BAND, not a floor.
+      • line >= 6.0: line 6.5 hit 64.6% vs 51.5% at 4.5-5.0.
+      • known opposing pitcher: 'unknown' stars hit just 48.3% (the ~50%
+        enrichment gap fixed 2026-07-24; requiring known tier avoids it).
+    Prime is a strict subset of _is_elite — typically 0-2/day. Some days
+    have none, which is honest. Thresholds sit on old-formula p_over, so
+    treat as interim until corrected-formula data accumulates.
+    """
+    return (_is_elite(p)
+            and 0.80 <= (p.get("p_over") or 0) <= 0.85
+            and float(p.get("line", 0) or 0) >= 6.0
+            and (p.get("pitcher_tier") or "") not in ("", "unknown"))
+
+
 def _find_locks(n: int = 3) -> list[dict]:
     """
     🔒 Lock tier: goblin (reduced-line) MLB picks where the model's own

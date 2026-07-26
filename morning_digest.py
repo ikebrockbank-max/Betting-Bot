@@ -16,7 +16,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 from daily_scorecard import build_scorecard
-from daily_top_picks import get_top_picks, _find_locks, _is_elite
+from daily_top_picks import get_top_picks, _find_locks, _is_elite, _is_prime
 
 # Sent-today marker (persisted across runs via actions/cache), so the first
 # retry slot that succeeds sends and later slots exit — same pattern as the
@@ -52,23 +52,30 @@ def build_digest():
     except Exception as e:
         lines.append(f"📊 Scorecard unavailable ({e})")
 
-    # 2) Today's picks + locks
-    picks_by_sport, fetch_failures = get_top_picks(["MLB"], n=4)
+    # 2) Today's picks + locks. Pull a few extra (n=6) so a 🎯 prime pick
+    # that ranks below the top 4 still surfaces — prime is a strict subset
+    # of stars and is the highest-hit-rate slice, so it always leads.
+    picks_by_sport, fetch_failures = get_top_picks(["MLB"], n=6)
     mlb = picks_by_sport.get("MLB", [])
-    stars = [p for p in mlb if _is_elite(p)]
+    primes = [p for p in mlb if _is_prime(p)]
+    stars = [p for p in mlb if _is_elite(p) and not _is_prime(p)]
     others = [p for p in mlb if not _is_elite(p)]
     locks = _find_locks(n=3)
 
     lines.append("")
-    lines.append(f"⭐ TODAY'S PICKS {_today_et()[5:]}")
+    lines.append(f"TODAY'S PICKS {_today_et()[5:]}")
+    if primes:
+        for p in primes:
+            lines.append(f"🎯 {p['player']} OVER {p['line']} {p['stat_type']}  (prime)")
     if stars:
         for p in stars:
             lines.append(f"⭐ {p['player']} {'OVER' if p['direction']=='OVER' else 'UNDER'} "
                          f"{p['line']} {p['stat_type']}")
-    else:
+    if not primes and not stars:
         lines.append("(no star picks cleared the bar today)")
-    # fill up to 4 total with best non-star gate picks
-    for p in others[:max(0, 4 - len(stars))]:
+    # fill toward ~4 standard picks total with best non-star gate picks
+    need = max(0, 4 - len(primes) - len(stars))
+    for p in others[:need]:
         lines.append(f"• {p['player']} {p['direction']} {p['line']} {p['stat_type']}")
 
     lines.append("")
