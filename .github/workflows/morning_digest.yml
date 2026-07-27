@@ -8,10 +8,16 @@ name: Morning Brief (9 AM)
 
 on:
   schedule:
-    - cron: '0 15 * * *'    # 9:00 AM MDT — primary
-    - cron: '30 16 * * *'   # 10:30 AM MDT — retry 1
-    - cron: '0 18 * * *'    # 12:00 PM MDT — retry 2 (lineups firmer)
-    - cron: '0 20 * * *'    # 2:00 PM MDT — final retry
+    # GitHub's scheduler is best-effort and runs top-of-hour crons (:00)
+    # 30-90 min late under load — the 15:00 slot was landing at 17:00+.
+    # Fix: schedule EARLY at off-peak odd minutes so that even with the
+    # usual delay the brief arrives around 9 AM MDT, and stack several
+    # slots (sent-today dedup means only the first success actually sends).
+    - cron: '37 14 * * *'   # ~8:37 AM MDT — primary (early to absorb delay)
+    - cron: '52 14 * * *'   # ~8:52 AM MDT — retry 1
+    - cron: '17 15 * * *'   # ~9:17 AM MDT — retry 2
+    - cron: '47 15 * * *'   # ~9:47 AM MDT — retry 3
+    - cron: '43 17 * * *'   # ~11:43 AM MDT — late retry (firmer lineups)
   workflow_dispatch:
     inputs:
       force:
