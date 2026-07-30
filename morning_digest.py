@@ -17,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 
 from daily_scorecard import build_scorecard
 from daily_top_picks import (get_top_picks, _find_locks, _is_elite, _is_prime,
-                             _is_borderline_star, _predicted_rate)
+                             _predicted_rate)
 
 # Sent-today marker (persisted across runs via actions/cache), so the first
 # retry slot that succeeds sends and later slots exit — same pattern as the
@@ -53,15 +53,14 @@ def build_digest():
     except Exception as e:
         lines.append(f"📊 Scorecard unavailable ({e})")
 
-    # 2) Today's picks + locks. Pull n=12 so borderline (park just-below-1.0)
-    # picks surface too — user wants ONLY high signals shown as bets, but a
-    # near-miss (park 0.95-0.999) shown with its honest historical rate so
-    # they can see the number. No generic filler.
-    picks_by_sport, fetch_failures = get_top_picks(["MLB"], n=12)
+    # 2) Today's picks + locks. Only park>=1.0 high-signal picks are sent —
+    # park just-below-1.0 (0.98) backtested at 33%, so those are dropped
+    # entirely, not shown. Each pick still displays its park + predicted
+    # rate for transparency.
+    picks_by_sport, fetch_failures = get_top_picks(["MLB"], n=6)
     mlb = picks_by_sport.get("MLB", [])
     primes = [p for p in mlb if _is_prime(p)]
     stars = [p for p in mlb if _is_elite(p) and not _is_prime(p)]
-    borderline = [p for p in mlb if _is_borderline_star(p)]
     locks = _find_locks(n=3)
 
     def pk(p):
@@ -77,12 +76,6 @@ def build_digest():
                      f"— park {pk(p):.2f}, {_predicted_rate(p)}")
     if not primes and not stars:
         lines.append("(no high-signal picks cleared the bar today)")
-    if borderline:
-        lines.append("")
-        lines.append("borderline (park just below neutral — your call):")
-        for p in borderline:
-            lines.append(f"• {p['player']} OVER {p['line']} {p['stat_type']} "
-                         f"— park {pk(p):.2f}, {_predicted_rate(p)}")
 
     lines.append("")
     lines.append("🔒 LOCKS (safer, goblin lines)")
