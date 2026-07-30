@@ -95,6 +95,38 @@ def _is_prime(p: dict) -> bool:
             and (p.get("pitcher_tier") or "") not in ("", "unknown"))
 
 
+def _is_borderline_star(p: dict) -> bool:
+    """A pick that meets every star filter EXCEPT park factor, where park sits
+    just below neutral (0.95-0.999). Shown separately with its true (weak)
+    historical rate so the user can see the number and decide — NOT a
+    recommendation. See _predicted_rate for why these underperform."""
+    return (p.get("stat_type") == "Hitter Fantasy Score"
+            and p.get("direction") == "OVER"
+            and 5.5 <= float(p.get("line", 0) or 0) <= 6.5
+            and 0.75 <= (p.get("p_over") or 0) <= 0.85
+            and (p.get("pitcher_tier") or "") in ("weak", "below_avg", "average")
+            and 0.95 <= float(p.get("park_factor", 0) or 0) < 1.0)
+
+
+def _predicted_rate(p: dict) -> str:
+    """Data-grounded predicted hit rate for a pick, keyed on its park band
+    within the star context (analysis_park_bands.py, corrected grades):
+      park >= 1.0   : 42/53 = 79%  (the star tier — solid sample)
+      park 0.98-1.0 : 3/9   = 33%  (worst band — tiny sample)
+      park 0.95-0.98: 7/14  = 50%  (tiny sample)
+    Small-sample bands are flagged so the number isn't read as precise."""
+    pk = float(p.get("park_factor", 0) or 0)
+    if pk >= 1.05:
+        return "~79% (hitter park)"
+    if pk >= 1.0:
+        return "~79% (neutral/hitter park)"
+    if pk >= 0.98:
+        return "~33% ⚠️ (park just below neutral — historically weak, small n)"
+    if pk >= 0.95:
+        return "~50% ⚠️ (slight pitcher park, small n)"
+    return "sub-50% (pitcher park)"
+
+
 def _find_locks(n: int = 3) -> list[dict]:
     """
     🔒 Lock tier: goblin (reduced-line) MLB picks where the model's own
