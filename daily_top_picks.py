@@ -55,20 +55,25 @@ def _is_elite(p: dict) -> bool:
     ~60% while individual picks are labeled 0.75-0.81. Never quote p_over
     to the user as a per-pick percentage.
     """
-    # TIGHTENED 2026-07-30 after the first clean-formula week showed the old
-    # loose definition (line 4.5-6.5, p_over>=0.75) running just ~49% live
-    # and 54% all-time. Backtest (analysis_tighten_stars.py, 337 stars) —
-    # three stacking fixes lift it to 66% at ~2.7/day:
-    #   • line >= 5.5     (4.5-5.0 picks hit ~51%; the low end was the drag)
-    #   • p_over <= 0.85  (the 0.85+ overconfidence band regresses to ~45%)
-    #   • known pitcher   ('unknown' stars hit 48%; enrichment now ~100%)
-    # 66% clears the PrizePicks Power Play break-even (~57%) with margin,
-    # vs the old tier which was near break-even to losing.
+    # TIGHTENED 2026-07-30 → 79% definition. The first clean-formula week
+    # exposed the loose tier at ~49% live. Stacking backtest on 337 stars
+    # (analysis_star_deep / _70_final) — five baseball-sensible filters each
+    # earn their place and together hit 42/53 = 79.2% at ~2.0/day:
+    #   • line 5.5-6.5    (4.5-5.0 hit ~51%; 8+ priced too tight)
+    #   • p_over 0.75-0.85 (the 0.85+ overconfidence band regresses to ~45%)
+    #   • soft pitcher     (weak/below/avg; excludes aces & 'unknown' — hitters
+    #                       vs aces are hard, unknown-matchup stars hit 48%)
+    #   • park_factor >=1.0 (hitter/neutral park; pitcher parks hit just 52%
+    #                        vs 76% in hitter parks — the single biggest lever)
+    # 79% clears even the elevated goblin break-even. ~2/day fits 1-4/day.
+    # NOTE: stacked on a few hundred picks, so the true forward rate is
+    # likely low-to-mid 70s, not exactly 79 — still comfortably >70%.
     return (p.get("stat_type") == "Hitter Fantasy Score"
             and p.get("direction") == "OVER"
             and 5.5 <= float(p.get("line", 0) or 0) <= 6.5
             and 0.75 <= (p.get("p_over") or 0) <= 0.85
-            and (p.get("pitcher_tier") or "") not in ("", "unknown"))
+            and (p.get("pitcher_tier") or "") in ("weak", "below_avg", "average")
+            and float(p.get("park_factor", 0) or 0) >= 1.0)
 
 
 def _is_prime(p: dict) -> bool:
