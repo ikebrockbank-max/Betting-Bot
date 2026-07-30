@@ -55,10 +55,20 @@ def _is_elite(p: dict) -> bool:
     ~60% while individual picks are labeled 0.75-0.81. Never quote p_over
     to the user as a per-pick percentage.
     """
+    # TIGHTENED 2026-07-30 after the first clean-formula week showed the old
+    # loose definition (line 4.5-6.5, p_over>=0.75) running just ~49% live
+    # and 54% all-time. Backtest (analysis_tighten_stars.py, 337 stars) —
+    # three stacking fixes lift it to 66% at ~2.7/day:
+    #   • line >= 5.5     (4.5-5.0 picks hit ~51%; the low end was the drag)
+    #   • p_over <= 0.85  (the 0.85+ overconfidence band regresses to ~45%)
+    #   • known pitcher   ('unknown' stars hit 48%; enrichment now ~100%)
+    # 66% clears the PrizePicks Power Play break-even (~57%) with margin,
+    # vs the old tier which was near break-even to losing.
     return (p.get("stat_type") == "Hitter Fantasy Score"
             and p.get("direction") == "OVER"
-            and 4.5 <= float(p.get("line", 0) or 0) <= 6.5
-            and (p.get("p_over") or 0) >= 0.75)
+            and 5.5 <= float(p.get("line", 0) or 0) <= 6.5
+            and 0.75 <= (p.get("p_over") or 0) <= 0.85
+            and (p.get("pitcher_tier") or "") not in ("", "unknown"))
 
 
 def _is_prime(p: dict) -> bool:
