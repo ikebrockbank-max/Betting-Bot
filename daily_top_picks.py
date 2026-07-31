@@ -95,6 +95,35 @@ def _is_prime(p: dict) -> bool:
             and (p.get("pitcher_tier") or "") not in ("", "unknown"))
 
 
+def _recently_cold(p: dict) -> bool:
+    """True if the hitter cleared this pick's line in 0 of his last 3 games
+    (corrected HFS). Safety net only — see the cold-guard note in
+    get_top_picks. Returns False on any lookup failure (never blocks a pick
+    just because the game log couldn't be fetched)."""
+    if p.get("stat_type") != "Hitter Fantasy Score":
+        return False
+    try:
+        import json as _j, urllib.request as _r
+        from data.mlb_batter_stats import find_player_id
+        from data.mlb_batter_stats import compute_hitter_fs as _hfs
+        pid = find_player_id(p.get("player", ""))
+        if not pid:
+            return False
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        d = _j.loads(_r.urlopen(
+            f"https://statsapi.mlb.com/api/v1/people/{pid}/stats"
+            f"?stats=gameLog&group=hitting&season=2026", timeout=10).read())
+        splits = sorted(d.get("stats", [{}])[0].get("splits", []),
+                        key=lambda x: x.get("date", ""))
+        prior = [s for s in splits if s.get("date", "") < today][-3:]
+        if len(prior) < 3:
+            return False   # not enough history to call cold
+        line = float(p.get("line", 0) or 0)
+        return all(_hfs(s["stat"]) <= line for s in prior)
+    except Exception:
+        return False
+
+
 def _is_borderline_star(p: dict) -> bool:
     """A pick that meets every star filter EXCEPT park factor, where park sits
     just below neutral (0.95-0.999). Shown separately with its true (weak)
@@ -270,6 +299,17 @@ def get_top_picks(sports: list[str], n: int = 6) -> tuple[dict[str, list[dict]],
                                          result.get("stat_type", "?"))
                     continue
                 if not _passes_direction_gate(result):
+                    continue
+                # Cold-guard: never let a star ride on a player who cleared
+                # this line 0 of his last 3 games. No historical star was ever
+                # 0/3 cold (the model normally filters them), so this drops 0
+                # backtested picks — it's a safety net for anomalies like the
+                # 2026-07-31 CJ Abrams flag (0/3, line drifted 5.5→6.0), not a
+                # claimed edge. Only checked for star-eligible picks (cheap:
+                # ~2/day) to avoid a game-log fetch on every gate pick.
+                if _is_elite(result) and _recently_cold(result):
+                    _log(f"  cold-guard dropped star {result.get('player')} "
+                         f"(0/3 over {result.get('line')})")
                     continue
                 scored.append(result)
                 time.sleep(0.02)
