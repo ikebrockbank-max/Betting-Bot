@@ -213,6 +213,52 @@ def _find_locks(n: int = 3) -> list[dict]:
     return out
 
 
+def _find_runs_watch(n: int = 2) -> list[dict]:
+    """🧪 EXPERIMENTAL — Runs UNDER vs a tough (ace/above-avg) pitcher.
+
+    UNPROVEN: backtest was 22/31 = 71% but n=31 is far too small to trust —
+    this is a WATCH tier that logs and grades so it can prove (or disprove)
+    itself on forward data. Do NOT treat it as vetted like Stars/Locks.
+    Logged with a " (RunsWatch)" stat suffix so it grades separately and
+    never collides with a standard pick (update_results strips the suffix).
+    """
+    import scanner_power_parlay as s
+    try:
+        lines = s.fetch_standard_lines(["MLB"])
+    except Exception as e:
+        _log(f"Runs-watch fetch failed (non-fatal): {e}")
+        return []
+    cands = []
+    for pick in lines:
+        if pick.get("stat_type") != "Runs":
+            continue
+        stats = s.get_stats_for_pick(pick)
+        if not stats:
+            continue
+        r = s.score_pick(stats, pick)
+        if r.get("skip_reason") or r.get("direction") != "UNDER":
+            continue
+        if (r.get("pitcher_tier") or "") not in ("ace", "above_avg"):
+            continue
+        p_under = r.get("p_under")
+        if p_under is None:
+            p_under = 1.0 - (r.get("p_over") or 0)
+        if p_under >= 0.70:
+            r["_p_under"] = p_under
+            cands.append(r)
+        time.sleep(0.02)
+    cands.sort(key=lambda x: x.get("_p_under", 0), reverse=True)
+    seen, out = set(), []
+    for p in cands:
+        if p["player"] not in seen:
+            seen.add(p["player"])
+            p["stat_type"] = f"{p['stat_type']} (RunsWatch)"
+            out.append(p)
+        if len(out) >= n:
+            break
+    return out
+
+
 def _mlb_trust_score(p: dict) -> float:
     stat = p.get("stat_type")
     conf = p.get("confidence", 0)

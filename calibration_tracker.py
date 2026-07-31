@@ -567,7 +567,10 @@ def update_results(target_date: str = None):
         # permanently unresolved (caught live 2026-07-19: 3-day-old locks
         # still pending).
         stat_key = e["stat_type"]
-        stat     = stat_key.replace(" (Goblin)", "")
+        # Strip tier suffixes (Goblin locks, RunsWatch experimental) for the
+        # box-score lookup, which only knows real stat names. stat_key keeps
+        # the suffix for row updates / local matching (see note above).
+        stat     = stat_key.replace(" (Goblin)", "").replace(" (RunsWatch)", "")
 
         actual = None
         if sport == "WNBA":

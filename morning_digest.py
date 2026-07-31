@@ -16,8 +16,8 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 from daily_scorecard import build_scorecard
-from daily_top_picks import (get_top_picks, _find_locks, _is_elite, _is_prime,
-                             _predicted_rate)
+from daily_top_picks import (get_top_picks, _find_locks, _find_runs_watch,
+                             _is_elite, _is_prime, _predicted_rate)
 
 # Sent-today marker (persisted across runs via actions/cache), so the first
 # retry slot that succeeds sends and later slots exit — same pattern as the
@@ -62,6 +62,7 @@ def build_digest():
     primes = [p for p in mlb if _is_prime(p)]
     stars = [p for p in mlb if _is_elite(p) and not _is_prime(p)]
     locks = _find_locks(n=3)
+    runs_watch = _find_runs_watch(n=2)
 
     def pk(p):
         return float(p.get("park_factor", 0) or 0)
@@ -86,6 +87,13 @@ def build_digest():
     else:
         lines.append("(no locks today)")
 
+    if runs_watch:
+        lines.append("")
+        lines.append("🧪 RUNS WATCH (experimental, unproven n=31 ~71%):")
+        for p in runs_watch:
+            lines.append(f"🧪 {p['player']} UNDER {p['line']} "
+                         f"{p['stat_type'].replace(' (RunsWatch)','')}")
+
     if fetch_failures:
         lines.append(f"\n⚠️ fetch issue: {', '.join(fetch_failures)}")
 
@@ -103,6 +111,8 @@ def build_digest():
         for p in mlb:
             log_pick(p)
         for p in locks:
+            log_pick(p)
+        for p in runs_watch:
             log_pick(p)
     except Exception as e:
         print(f"[digest] calibration logging failed: {e}")
