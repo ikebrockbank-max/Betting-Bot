@@ -37,13 +37,18 @@ def build_scorecard(date=None) -> str:
     # hit_rate/pitcher_tier/edge_pct are required by _passes_direction_gate —
     # omitting them silently fails the gate for most hitter OVERs and craters
     # the 'gate' bucket (caught 2026-07-24: reported 4/6 instead of 38/74).
+    # park_factor is REQUIRED by _is_elite (the 79% star def). It was added to
+    # _is_elite later but not to this SELECT, so every pick had park=0 and the
+    # STAR bucket silently counted ZERO — 7/31 & 8/1 each had 3 stars (all hit)
+    # reported as 0. Same class of bug as the earlier missing-hit_rate one.
     rows = _sb_fetch(f"select=player,sport,stat_type,direction,line,confidence,"
-                     f"p_over,hit_rate,pitcher_tier,edge_pct,result,pick_date"
+                     f"p_over,hit_rate,pitcher_tier,edge_pct,park_factor,result,pick_date"
                      f"&pick_date=eq.{date}")
     for r in rows:
         r["line"] = _f(r, "line")
         r["hit_rate"] = _f(r, "hit_rate")
         r["edge_pct"] = _f(r, "edge_pct")
+        r["park_factor"] = _f(r, "park_factor")
         r["pitcher_tier"] = r.get("pitcher_tier") or ""
 
     def grade(r):
