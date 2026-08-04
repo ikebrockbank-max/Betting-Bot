@@ -67,13 +67,17 @@ def build_digest():
     def pk(p):
         return float(p.get("park_factor", 0) or 0)
 
+    def vs_pit(p):
+        op = (p.get("opp_pitcher") or "").strip()
+        return f" vs {op}" if op and op.lower() != "unknown" else ""
+
     lines.append("")
     lines.append(f"TODAY'S PICKS {_today_et()[5:]}")
     for p in primes:
-        lines.append(f"🎯 {p['player']} OVER {p['line']} {p['stat_type']} "
+        lines.append(f"🎯 {p['player']} OVER {p['line']} {p['stat_type']}{vs_pit(p)} "
                      f"(prime) — park {pk(p):.2f}, {_predicted_rate(p)}")
     for p in stars:
-        lines.append(f"⭐ {p['player']} OVER {p['line']} {p['stat_type']} "
+        lines.append(f"⭐ {p['player']} OVER {p['line']} {p['stat_type']}{vs_pit(p)} "
                      f"— park {pk(p):.2f}, {_predicted_rate(p)}")
     if not primes and not stars:
         lines.append("(no high-signal picks cleared the bar today)")
@@ -83,7 +87,7 @@ def build_digest():
     if locks:
         for p in locks:
             lines.append(f"🔒 {p['player']} OVER {p['line']} "
-                         f"{p['stat_type'].replace(' (Goblin)','')}")
+                         f"{p['stat_type'].replace(' (Goblin)','')}{vs_pit(p)}")
     else:
         lines.append("(no locks today)")
 
