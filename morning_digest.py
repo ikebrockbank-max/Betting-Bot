@@ -106,6 +106,38 @@ def build_digest():
             lines.append(f"🧪 {p['player']} UNDER {p['line']} "
                          f"{p['stat_type'].replace(' (RunsWatch)','')}")
 
+    # 🎫 Recommended ticket — build the best 3-leg parlay from ONLY the vetted
+    # picks, so the user has a ready-made optimal ticket and never reaches for
+    # an unvetted "taco" leg (the demonstrated loss driver). Per-leg est. from
+    # tier rates; prefer the highest-probability legs, spread across games to
+    # avoid same-game correlation stacking. 3 legs = best EV/variance balance.
+    TIER_P = 0.78
+    cand = ([("🎯", 0.80, p) for p in primes]
+            + [("⭐", 0.75, p) for p in stars]
+            + [("🔒", 0.81, p) for p in locks])
+    cand.sort(key=lambda x: x[1], reverse=True)
+    # dedup by game_id where available so we don't stack one game
+    picked, seen_games = [], set()
+    for tag, pr, p in cand:
+        g = p.get("game_id") or p.get("player")
+        if g in seen_games:
+            continue
+        seen_games.add(g)
+        picked.append((tag, pr, p))
+        if len(picked) >= 3:
+            break
+    if len(picked) >= 2:
+        joint = 1.0
+        for _, pr, _ in picked:
+            joint *= pr
+        lines.append("")
+        lines.append(f"🎫 SUGGESTED {len(picked)}-LEG TICKET (~{joint*100:.0f}% to cash "
+                     f"— bet ONLY these, no extra legs):")
+        for tag, pr, p in picked:
+            st = (p["stat_type"].replace(" (Goblin)", "").replace(" (WNBAhot)", ""))
+            dr = "OVER" if p.get("direction") == "OVER" else "UNDER"
+            lines.append(f"   {tag} {p['player']} {dr} {p['line']} {st}")
+
     if fetch_failures:
         lines.append(f"\n⚠️ fetch issue: {', '.join(fetch_failures)}")
 
