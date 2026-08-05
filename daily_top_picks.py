@@ -277,6 +277,17 @@ def _find_wnba_hot(n: int = 3) -> list[dict]:
     except Exception as e:
         _log(f"WNBA-hot fetch failed (non-fatal): {e}")
         return []
+    # Injury screen: a "hot" player who's suddenly out/questionable/minutes-
+    # restricted is the exact trap — her recent-form trend is stale. Skip any
+    # WNBA player on the injury report with a disqualifying OR warning status.
+    try:
+        from data.injuries import (get_injury_report, check_player,
+                                    DISQUALIFYING_STATUSES, WARNING_STATUSES)
+        _inj = get_injury_report("WNBA")
+        _bad = DISQUALIFYING_STATUSES | WARNING_STATUSES
+    except Exception as e:
+        _log(f"WNBA injury report unavailable (proceeding without screen): {e}")
+        _inj, _bad = {}, set()
     cands = []
     for pick in lines:
         if pick.get("stat_type") not in ("Pts+Rebs+Asts", "Pts+Rebs"):
@@ -289,8 +300,17 @@ def _find_wnba_hot(n: int = 3) -> list[dict]:
             continue
         if (r.get("trend") or 0) <= 0.15:            # must be hot
             continue
-        if (r.get("home_away") or "") == "away":     # away kills it (62%)
+        # Away kills it (62% vs 94% home). Require CONFIRMED home — a pick
+        # with unknown home/away is NOT allowed through, so we can never
+        # accidentally play an away game.
+        if (r.get("home_away") or "").lower() != "home":
             continue
+        # Injury screen
+        if _inj:
+            entry = check_player(r.get("player", ""), _inj)
+            if entry and (entry.get("status", "").lower() in _bad):
+                _log(f"WNBA-hot injury skip: {r.get('player')} ({entry.get('status')})")
+                continue
         cands.append(r)
         time.sleep(0.02)
     # Rank: PRA over PR, then higher p_over, then stronger trend (all lifted
