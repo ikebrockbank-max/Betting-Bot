@@ -17,7 +17,7 @@ Lower context_score  = matchup works against it.
 import json
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 _CACHE_DIR = Path("logs/context_cache")
@@ -696,8 +696,14 @@ def get_wnba_context(player_name: str, stat_type: str,
         "splits":        {},
     }
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    games = _get_wnba_schedule(today)
+    # WNBA games are US-evening, so a game "today" (US Eastern) is often the
+    # NEXT UTC day. Using the raw UTC date missed those games and left ~42%
+    # of picks with home_away="unknown". Look up the ET date AND the next ET
+    # date, combining both scoreboards, so evening games are always found.
+    _et = datetime.now(timezone.utc) - timedelta(hours=4)
+    games = []
+    for _d in (_et, _et + timedelta(days=1)):
+        games += _get_wnba_schedule(_d.strftime("%Y-%m-%d"))
     name_lower = player_name.lower()
 
     # Find which game this player is in
@@ -705,17 +711,19 @@ def get_wnba_context(player_name: str, stat_type: str,
     opp_abbr   = None
     opp_name   = None
 
+    player_last = name_lower.split()[-1] if name_lower else ""
     for g in games:
         away_names = [n.lower() for n in g.get("away_players", [])]
         home_names = [n.lower() for n in g.get("home_players", [])]
-        player_last = name_lower.split()[-1]
 
-        if any(player_last in n for n in home_names) or any(name_lower in n for n in home_names):
+        if any(player_last == n.split()[-1] for n in home_names if n) \
+                or any(name_lower in n for n in home_names):
             is_home  = True
             opp_abbr = g["away_abbr"]
             opp_name = g["away_name"]
             break
-        if any(player_last in n for n in away_names) or any(name_lower in n for n in away_names):
+        if any(player_last == n.split()[-1] for n in away_names if n) \
+                or any(name_lower in n for n in away_names):
             is_home  = False
             opp_abbr = g["home_abbr"]
             opp_name = g["home_name"]
