@@ -72,14 +72,28 @@ def build_digest():
         op = (p.get("opp_pitcher") or "").strip()
         return f" vs {op}" if op and op.lower() != "unknown" else ""
 
+    def l5(p):
+        """Recent-form tag: how many of the last 5 games cleared this line, so
+        the tier label is never trusted blind. A soft run (≤2/5) still inside
+        normal variance for an ~80% pick, but the user sees it and decides."""
+        rec = (p.get("recent_values") or [])[:5]
+        if not rec:
+            return ""
+        line = float(p.get("line", 0) or 0)
+        over = (p.get("direction") != "UNDER")
+        hits = sum(1 for v in rec
+                   if (v >= line if over else v <= line))
+        flag = " ⚠️" if hits <= 2 else ""
+        return f" [L5: {hits}/{len(rec)}{flag}]"
+
     lines.append("")
     lines.append(f"TODAY'S PICKS {_today_et()[5:]}")
     for p in primes:
         lines.append(f"🎯 {p['player']} OVER {p['line']} {p['stat_type']}{vs_pit(p)} "
-                     f"(prime) — park {pk(p):.2f}, {_predicted_rate(p)}")
+                     f"(prime) — park {pk(p):.2f}, {_predicted_rate(p)}{l5(p)}")
     for p in stars:
         lines.append(f"⭐ {p['player']} OVER {p['line']} {p['stat_type']}{vs_pit(p)} "
-                     f"— park {pk(p):.2f}, {_predicted_rate(p)}")
+                     f"— park {pk(p):.2f}, {_predicted_rate(p)}{l5(p)}")
     if not primes and not stars:
         lines.append("(no high-signal picks cleared the bar today)")
 
@@ -88,7 +102,7 @@ def build_digest():
     if locks:
         for p in locks:
             lines.append(f"🔒 {p['player']} OVER {p['line']} "
-                         f"{p['stat_type'].replace(' (Goblin)','')}{vs_pit(p)}")
+                         f"{p['stat_type'].replace(' (Goblin)','')}{vs_pit(p)}{l5(p)}")
     else:
         lines.append("(no locks today)")
 
@@ -108,17 +122,21 @@ def build_digest():
 
     # 🎫 Recommended ticket — build the best 3-leg parlay from ONLY the vetted
     # picks, so the user has a ready-made optimal ticket and never reaches for
-    # an unvetted "taco" leg (the demonstrated loss driver). Per-leg est. from
-    # tier rates; prefer the highest-probability legs, spread across games to
-    # avoid same-game correlation stacking. 3 legs = best EV/variance balance.
-    TIER_P = 0.78
-    cand = ([("🎯", 0.80, p) for p in primes]
-            + [("⭐", 0.75, p) for p in stars]
-            + [("🔒", 0.81, p) for p in locks])
-    cand.sort(key=lambda x: x[1], reverse=True)
+    # an unvetted "taco" leg (the demonstrated loss driver). Selection is by
+    # tier CONVICTION (prime → star → lock), not raw hit rate: the tiers all
+    # backtest ~79-81%, so sorting purely by probability made locks always win
+    # and flagship star plays never appeared. Lead with the highest-conviction
+    # signal, fill remaining slots with the safer locks. Per-leg probabilities
+    # (from backtests) still drive the win-% math. Spread across games to avoid
+    # same-game correlation. 3 legs = best EV/variance balance.
+    #   (tag, selection_priority, per_leg_prob, pick)
+    cand = ([("🎯", 3, 0.80, p) for p in primes]
+            + [("⭐", 2, 0.79, p) for p in stars]
+            + [("🔒", 1, 0.81, p) for p in locks])
+    cand.sort(key=lambda x: (x[1], x[2]), reverse=True)
     # dedup by game_id where available so we don't stack one game
     picked, seen_games = [], set()
-    for tag, pr, p in cand:
+    for tag, _prio, pr, p in cand:
         g = p.get("game_id") or p.get("player")
         if g in seen_games:
             continue
@@ -136,7 +154,7 @@ def build_digest():
         for tag, pr, p in picked:
             st = (p["stat_type"].replace(" (Goblin)", "").replace(" (WNBAhot)", ""))
             dr = "OVER" if p.get("direction") == "OVER" else "UNDER"
-            lines.append(f"   {tag} {p['player']} {dr} {p['line']} {st}")
+            lines.append(f"   {tag} {p['player']} {dr} {p['line']} {st}{l5(p)}")
 
     if fetch_failures:
         lines.append(f"\n⚠️ fetch issue: {', '.join(fetch_failures)}")
