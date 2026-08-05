@@ -570,7 +570,8 @@ def update_results(target_date: str = None):
         # Strip tier suffixes (Goblin locks, RunsWatch experimental) for the
         # box-score lookup, which only knows real stat names. stat_key keeps
         # the suffix for row updates / local matching (see note above).
-        stat     = stat_key.replace(" (Goblin)", "").replace(" (RunsWatch)", "")
+        stat     = (stat_key.replace(" (Goblin)", "").replace(" (RunsWatch)", "")
+                    .replace(" (WNBAhot)", ""))
 
         actual = None
         if sport == "WNBA":

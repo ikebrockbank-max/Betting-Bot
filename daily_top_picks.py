@@ -259,6 +259,56 @@ def _find_runs_watch(n: int = 2) -> list[dict]:
     return out
 
 
+def _find_wnba_hot(n: int = 3) -> list[dict]:
+    """🏀 WNBA HOT — the edge-hunt find (2026-08-05). Combo OVERs on hot
+    players PERSIST (unlike MLB, where hot regresses) because WNBA combo
+    stats are minutes/usage-driven and roles are sticky.
+
+    Definition (validated era-split + refinement, analysis_wnba_refine.py):
+      Pts+Rebs+Asts or Pts+Rebs, OVER, trend hot (>0.15), NOT a confirmed
+      away game. Pool 76%; away games (62%) excluded lift it to the mid-80s;
+      home alone was 16/17=94%. Sample is modest (~71 picks) — newer/less
+      proven than the MLB star tier, so labeled as such in the brief.
+    Logged with a " (WNBAhot)" suffix so it grades separately.
+    """
+    import scanner_power_parlay as s
+    try:
+        lines = s.fetch_standard_lines(["WNBA"])
+    except Exception as e:
+        _log(f"WNBA-hot fetch failed (non-fatal): {e}")
+        return []
+    cands = []
+    for pick in lines:
+        if pick.get("stat_type") not in ("Pts+Rebs+Asts", "Pts+Rebs"):
+            continue
+        stats = s.get_stats_for_pick(pick)
+        if not stats:
+            continue
+        r = s.score_pick(stats, pick)
+        if r.get("skip_reason") or r.get("direction") != "OVER":
+            continue
+        if (r.get("trend") or 0) <= 0.15:            # must be hot
+            continue
+        if (r.get("home_away") or "") == "away":     # away kills it (62%)
+            continue
+        cands.append(r)
+        time.sleep(0.02)
+    # Rank: PRA over PR, then higher p_over, then stronger trend (all lifted
+    # the rate in refinement: PRA 82%, p_over 0.80+ 94%, very-hot 92%).
+    cands.sort(key=lambda x: (x.get("stat_type") == "Pts+Rebs+Asts",
+                              x.get("p_over") or 0, x.get("trend") or 0),
+               reverse=True)
+    seen, out = set(), []
+    for p in cands:
+        if p["player"] not in seen:
+            seen.add(p["player"])
+            p["stat_type"] = f"{p['stat_type']} (WNBAhot)"
+            out.append(p)
+        if len(out) >= n:
+            break
+    return out
+
+
 def _mlb_trust_score(p: dict) -> float:
     stat = p.get("stat_type")
     conf = p.get("confidence", 0)
