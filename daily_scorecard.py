@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 
 from calibration_tracker import _sb_fetch, _fetch_actual_mlb
 from parlay_builder import _passes_direction_gate
-from daily_top_picks import _is_elite
+from daily_top_picks import _is_elite, _is_prime
 
 
 def _f(r, k):
@@ -62,14 +62,22 @@ def build_scorecard(date=None) -> str:
             return r["result"] == "hit"
         return None
 
-    tiers = {"STAR": [], "LOCK": [], "gate": [], "all": []}
+    # STAR must match EXACTLY what the morning brief displayed under ⭐:
+    # elite-but-not-prime. A prime is also _is_elite, so counting bare
+    # _is_elite double-billed primes as stars (user saw 1 ⭐ but scorecard
+    # said 2). Primes get their own 🎯 line; stars exclude them, same split
+    # as morning_digest.build_digest.
+    tiers = {"PRIME": [], "STAR": [], "LOCK": [], "gate": [], "all": []}
     star_detail = []
     for r in rows:
         hit = grade(r)
         if hit is None:
             continue
         tiers["all"].append(hit)
-        if _is_elite(r):
+        if _is_prime(r):
+            tiers["PRIME"].append(hit)
+            star_detail.append((r["player"].split()[-1], hit))
+        elif _is_elite(r):
             tiers["STAR"].append(hit)
             star_detail.append((r["player"].split()[-1], hit))
         if _is_lock(r):
@@ -83,7 +91,7 @@ def build_scorecard(date=None) -> str:
         return f"{label}: {sum(b)}/{len(b)} ({sum(b)/len(b):.0%})"
 
     parts = [f"📊 Scorecard {date[5:]}"]
-    for k, lbl in (("STAR", "⭐ Stars"), ("LOCK", "🔒 Locks"),
+    for k, lbl in (("PRIME", "🎯 Primes"), ("STAR", "⭐ Stars"), ("LOCK", "🔒 Locks"),
                    ("gate", "Gate"), ("all", "All")):
         ln = line(lbl, tiers[k])
         if ln:
