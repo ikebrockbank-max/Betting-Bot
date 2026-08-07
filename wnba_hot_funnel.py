@@ -22,23 +22,24 @@ for pick in combos:
     if info.get("home_away") != "home":
         continue
     n_home += 1
-    vals = w.recent_combo_values(info["player_id"], pick["stat_type"], n=10)
+    vals, mins = w.recent_combo_series(info["player_id"], pick["stat_type"], n=12)
     if not vals:
         if len(samples) < 8:
             samples.append((pick["player"], "NO VALS", info["player_id"]))
         continue
     n_vals += 1
-    r = s._compute_stats(pick["player"], pick["stat_type"], pick["line"], vals, "WNBA")
-    if not r:
-        if len(samples) < 8:
-            samples.append((pick["player"], f"compute None (n={len(vals)})", vals[:5]))
+    proj = w.project(vals, mins)
+    if proj is None:
         continue
-    if r["direction"] == "OVER":
+    direction = "OVER" if proj > pick["line"] else "UNDER"
+    base = sum(vals[:10]) / len(vals[:10])
+    trend = ((sum(vals[:3]) / len(vals[:3])) - base) / (base + 1e-9)
+    if direction == "OVER":
         n_over += 1
-    if len(samples) < 8:
-        samples.append((pick["player"], pick["line"], r["direction"],
-                        f"trend={r['trend']}", f"avg={r['avg']}", f"L5={r['recent_values'][:5]}"))
-    if r["direction"] == "OVER" and (r.get("trend") or 0) > 0.15:
+    if len(samples) < 10:
+        samples.append((pick["player"], f"line={pick['line']}", direction,
+                        f"proj={proj}", f"trend={round(trend,3)}", f"L5={vals[:5]}"))
+    if direction == "OVER" and trend > 0.15:
         n_hot += 1
 
 print(f"\nFUNNEL: combos={len(combos)} -> resolved={n_resolved} -> home={n_home} "

@@ -175,27 +175,87 @@ def recent_combo_values(player_id: str, stat_type: str, n: int = 10) -> list[flo
     if not seen:
         return []
 
-    def val(stats) -> float | None:
-        try:
-            pts = float(stats[_IDX["PTS"]])
-            reb = float(stats[_IDX["REB"]])
-            ast = float(stats[_IDX["AST"]])
-        except (IndexError, ValueError, TypeError):
-            return None
-        if stat_type == "Pts+Rebs+Asts":
-            return pts + reb + ast
-        if stat_type == "Pts+Rebs":
-            return pts + reb
-        return None
-
-    out = []
-    for eid in sorted(seen, reverse=True):          # newest first
-        v = val(seen[eid])
-        if v is not None:
-            out.append(v)
-        if len(out) >= n:
-            break
+    out, _mins = _series_from_events(seen, stat_type, n)
     return out
+
+
+def _combo(stats, stat_type) -> float | None:
+    try:
+        pts = float(stats[_IDX["PTS"]])
+        reb = float(stats[_IDX["REB"]])
+        ast = float(stats[_IDX["AST"]])
+    except (IndexError, ValueError, TypeError):
+        return None
+    if stat_type == "Pts+Rebs+Asts":
+        return pts + reb + ast
+    if stat_type == "Pts+Rebs":
+        return pts + reb
+    return None
+
+
+def _series_from_events(seen: dict, stat_type: str, n: int):
+    """Return (combo_values, minutes) most-recent-first, aligned per game."""
+    vals, mins = [], []
+    for eid in sorted(seen, reverse=True):          # newest first (eventId ↑ over time)
+        stats = seen[eid]
+        v = _combo(stats, stat_type)
+        if v is None:
+            continue
+        try:
+            mn = float(stats[_IDX["MIN"]])
+        except (IndexError, ValueError, TypeError):
+            mn = 0.0
+        vals.append(v)
+        mins.append(mn)
+        if len(vals) >= n:
+            break
+    return vals, mins
+
+
+def recent_combo_series(player_id: str, stat_type: str, n: int = 12):
+    """(combo_values, minutes) most-recent-first — the inputs the minutes/
+    efficiency projection needs to judge a hot player's true OVER direction."""
+    d = _get(f"player-gamelog?playerId={player_id}&year={_season_year()}")
+    if not d:
+        return [], []
+    gl = d.get("player_gamelog", {})
+    seen: dict[int, list] = {}
+    for stype in gl.get("seasonTypes", []) or []:
+        for cat in stype.get("categories", []) or []:
+            for ev in cat.get("events", []) or []:
+                eid = ev.get("eventId") or ev.get("id")
+                stats = ev.get("stats")
+                if not eid or not stats:
+                    continue
+                try:
+                    seen[int(eid)] = stats
+                except (TypeError, ValueError):
+                    continue
+    return _series_from_events(seen, stat_type, n)
+
+
+def project(values: list, minutes: list) -> float | None:
+    """Faithful reconstruction of data/wnba_stats.py's projected_stat: a
+    minutes-and-efficiency projection that captures a hot player's rising
+    trajectory (recent minutes × recent per-minute rate). Values/minutes are
+    most-recent-first and aligned. Omits the original's injury-minute boost and
+    usage-noise discount (refinements), so treat it as a close approximation."""
+    if len(values) < 3 or len(minutes) < 3:
+        return None
+    n = len(values)
+    season_avg = sum(values) / n
+    season_min = sum(minutes) / n
+    if season_min <= 0:
+        return None
+    n3, n5 = min(3, n), min(5, n)
+    l3_min = sum(minutes[:n3]) / n3
+    l5_min = sum(minutes[:n5]) / n5
+    l5_avg = sum(values[:n5]) / n5
+    projected_minutes = min(38.0, l3_min * 0.50 + l5_min * 0.30 + season_min * 0.20)
+    stat_per_min = season_avg / season_min
+    l5_per_min = (l5_avg / l5_min) if l5_min > 0 else stat_per_min
+    blended_rate = l5_per_min * 0.60 + stat_per_min * 0.40
+    return round(blended_rate * projected_minutes, 2)
 
 
 def injured_names() -> set:

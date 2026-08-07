@@ -306,17 +306,34 @@ def _find_wnba_hot(n: int = 3) -> list[dict]:
         if w._norm(pick["player"]) in _inj:          # hot-but-hurt trap
             _log(f"WNBA-hot injury skip: {pick['player']}")
             continue
-        vals = w.recent_combo_values(info["player_id"], pick["stat_type"], n=10)
+        vals, mins = w.recent_combo_series(info["player_id"], pick["stat_type"], n=12)
         r = s._compute_stats(pick["player"], pick["stat_type"], pick["line"], vals, "WNBA")
-        if not r or r.get("direction") != "OVER":
+        if not r:
+            continue
+        # Direction from the minutes/efficiency PROJECTION, not the flat 10-game
+        # average — PP sets combo lines just above trailing avg, so a raw-avg
+        # rule reads UNDER even for players trending over. This mirrors the
+        # original tier's projected_stat override (data/wnba_stats.py).
+        proj = w.project(vals, mins)
+        if proj is None:
+            continue
+        r["projected_stat"] = proj
+        r["avg"] = proj                              # projection is the primary signal
+        r["direction"] = "OVER" if proj > pick["line"] else "UNDER"
+        # OVER-oriented trend: recent (L3) vs baseline (L10), positive = heating up
+        l10 = vals[:10]
+        l3 = vals[:3]
+        base = (sum(l10) / len(l10)) if l10 else 0.0
+        r["trend"] = round(((sum(l3) / len(l3)) - base) / (base + 1e-9), 3) if l3 else 0.0
+        if r["direction"] != "OVER":
             continue
         if (r.get("trend") or 0) <= 0.15:            # must be hot
             continue
-        # p_over for ranking: Gaussian tail from the player's own outcome σ;
-        # fall back to the hit rate when σ is unavailable (n<4).
+        # p_over for ranking: Gaussian tail around the projection using the
+        # player's own outcome σ; fall back to hit rate when σ is unavailable.
         sd = r.get("stat_std_dev")
         if sd and sd > 0:
-            p_over = 1.0 - _st.NormalDist(r["avg"], sd).cdf(pick["line"])
+            p_over = 1.0 - _st.NormalDist(proj, sd).cdf(pick["line"])
         else:
             p_over = r.get("hit_rate", 0.0)
         r["p_over"]     = round(p_over, 3)
