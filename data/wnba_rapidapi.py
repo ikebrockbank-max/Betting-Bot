@@ -87,6 +87,13 @@ def _today_et_parts():
     return et.strftime("%Y"), et.strftime("%m"), et.strftime("%d")
 
 
+def _season_year() -> str:
+    """Current WNBA season year (ET). player-gamelog defaults to an OLD season
+    (2024) unless &year is passed — omitting it silently served 12-month-stale
+    stats, which is what made the tier compute 'hot' on last-year's numbers."""
+    return (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y")
+
+
 def build_player_index(date_parts=None) -> dict:
     """Map every player on a team playing TODAY to their home/away + id.
 
@@ -148,7 +155,8 @@ def recent_combo_values(player_id: str, stat_type: str, n: int = 10) -> list[flo
     seasonTypes and sorted by numeric ESPN gameId (increases over time) so the
     newest games come first — no season-boundary parsing needed.
     """
-    d = _get(f"player-gamelog?playerId={player_id}")
+    # &year is REQUIRED — without it the endpoint returns the 2024 season.
+    d = _get(f"player-gamelog?playerId={player_id}&year={_season_year()}")
     if not d:
         return []
     gl = d.get("player_gamelog", {})
