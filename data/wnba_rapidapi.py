@@ -36,7 +36,7 @@ def available() -> bool:
 
 # PTS/REB/AST live at these indices in every gamelog event's `stats` array,
 # per the confirmed `labels` = [MIN, PTS, REB, AST, STL, BLK, TO, ...].
-_IDX = {"PTS": 1, "REB": 2, "AST": 3}
+_IDX = {"MIN": 0, "PTS": 1, "REB": 2, "AST": 3}
 
 _mem: dict = {}           # in-process cache (one scan reuses schedule/rosters)
 _last_call = [0.0]
