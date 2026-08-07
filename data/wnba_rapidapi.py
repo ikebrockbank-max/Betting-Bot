@@ -21,9 +21,16 @@ import time
 import unicodedata
 import urllib.request
 import urllib.error
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 _HOST = "wnba-api.p.rapidapi.com"
+
+# Disk cache lives under logs/ because the morning-digest workflow persists
+# logs/ across its retry slots (actions/cache). Free tier is only 100 calls/day
+# and one scan is ~30-40 — without a cross-slot cache, a few failed-send retries
+# (each re-scanning) would blow the daily budget. Day-stamped so it self-expires.
+_CACHE_DIR = Path("logs/wnba_cache")
 
 
 def _key() -> str:
@@ -49,11 +56,28 @@ def _throttle():
     _last_call[0] = time.time()
 
 
+def _cache_file(path: str) -> Path:
+    day = (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y%m%d")
+    safe = "".join(c if c.isalnum() else "_" for c in path)[:110]
+    return _CACHE_DIR / f"{day}_{safe}.json"
+
+
 def _get(path: str, retries: int = 4):
-    """GET a RapidAPI path with per-second throttle + 429 backoff. Memoised
-    for the life of the process so repeated lookups in one scan are free."""
+    """GET a RapidAPI path with per-second throttle + 429 backoff. Cached both
+    in-process and on disk (day-stamped under logs/) so repeated lookups in one
+    scan — and across the digest's retry slots — don't re-spend the 100/day
+    budget. Only successful responses are cached; a 429/None is not, so a later
+    slot with quota can still fetch it."""
     if path in _mem:
         return _mem[path]
+    cf = _cache_file(path)
+    if cf.exists():
+        try:
+            d = json.loads(cf.read_text())
+            _mem[path] = d
+            return d
+        except Exception:
+            pass
     hdrs = {"x-rapidapi-host": _HOST, "x-rapidapi-key": _key()}
     for a in range(retries):
         _throttle()
@@ -62,16 +86,19 @@ def _get(path: str, retries: int = 4):
             with urllib.request.urlopen(req, timeout=25) as r:
                 d = json.loads(r.read())
                 _mem[path] = d
+                try:
+                    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                    cf.write_text(json.dumps(d))
+                except Exception:
+                    pass
                 return d
         except urllib.error.HTTPError as e:
             if e.code == 429:          # throttled — back off and retry
                 time.sleep(3 + 2 * a)
                 continue
-            _mem[path] = None
-            return None
+            return None                # do NOT cache errors (retry next slot)
         except Exception:
             time.sleep(2)
-    _mem[path] = None
     return None
 
 
