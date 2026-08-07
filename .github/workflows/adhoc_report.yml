@@ -35,6 +35,7 @@ jobs:
         env:
           SUPABASE_URL:      https://gggozciyvjeqjnmufigp.supabase.co
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          RAPIDAPI_KEY:      ${{ secrets.RAPIDAPI_KEY }}
         run: |
           CMD="${{ github.event.inputs.command }}"
           if [ -f "$CMD" ]; then
