@@ -272,47 +272,61 @@ def _find_wnba_hot(n: int = 3) -> list[dict]:
     Logged with a " (WNBAhot)" suffix so it grades separately.
     """
     import scanner_power_parlay as s
+    from data import wnba_rapidapi as w
+    # RapidAPI (RAPIDAPI_KEY) is the working WNBA data source — ESPN began
+    # IP-blocking the runner (403) and stats.wnba.com times out from datacenter
+    # IPs, which had left this tier dead (0 picks ever). Without the key there's
+    # no source, so skip cleanly rather than emit garbage.
+    if not w.available():
+        _log("WNBA-hot skipped: RAPIDAPI_KEY not set (no working data source)")
+        return []
     try:
         lines = s.fetch_standard_lines(["WNBA"])
     except Exception as e:
         _log(f"WNBA-hot fetch failed (non-fatal): {e}")
         return []
-    # Injury screen: a "hot" player who's suddenly out/questionable/minutes-
-    # restricted is the exact trap — her recent-form trend is stale. Skip any
-    # WNBA player on the injury report with a disqualifying OR warning status.
+
+    # Resolve the cheap home/away gate FIRST (1 schedule + a roster per team),
+    # so we only spend the pricier per-player game-log calls on HOME players.
     try:
-        from data.injuries import (get_injury_report, check_player,
-                                    DISQUALIFYING_STATUSES, WARNING_STATUSES)
-        _inj = get_injury_report("WNBA")
-        _bad = DISQUALIFYING_STATUSES | WARNING_STATUSES
-    except Exception as e:
-        _log(f"WNBA injury report unavailable (proceeding without screen): {e}")
-        _inj, _bad = {}, set()
+        _inj = w.injured_names()          # best-effort; empty set if unavailable
+    except Exception:
+        _inj = set()
+
+    import statistics as _st
     cands = []
     for pick in lines:
         if pick.get("stat_type") not in ("Pts+Rebs+Asts", "Pts+Rebs"):
             continue
-        stats = s.get_stats_for_pick(pick)
-        if not stats:
+        info = w.resolve(pick["player"])
+        # Away kills it (62% vs 94% home). Require CONFIRMED home — unknown
+        # home/away is NOT allowed through, so we never accidentally play away.
+        if not info or info.get("home_away") != "home":
             continue
-        r = s.score_pick(stats, pick)
-        if r.get("skip_reason") or r.get("direction") != "OVER":
+        if w._norm(pick["player"]) in _inj:          # hot-but-hurt trap
+            _log(f"WNBA-hot injury skip: {pick['player']}")
+            continue
+        vals = w.recent_combo_values(info["player_id"], pick["stat_type"], n=10)
+        r = s._compute_stats(pick["player"], pick["stat_type"], pick["line"], vals, "WNBA")
+        if not r or r.get("direction") != "OVER":
             continue
         if (r.get("trend") or 0) <= 0.15:            # must be hot
             continue
-        # Away kills it (62% vs 94% home). Require CONFIRMED home — a pick
-        # with unknown home/away is NOT allowed through, so we can never
-        # accidentally play an away game.
-        if (r.get("home_away") or "").lower() != "home":
-            continue
-        # Injury screen
-        if _inj:
-            entry = check_player(r.get("player", ""), _inj)
-            if entry and (entry.get("status", "").lower() in _bad):
-                _log(f"WNBA-hot injury skip: {r.get('player')} ({entry.get('status')})")
-                continue
+        # p_over for ranking: Gaussian tail from the player's own outcome σ;
+        # fall back to the hit rate when σ is unavailable (n<4).
+        sd = r.get("stat_std_dev")
+        if sd and sd > 0:
+            p_over = 1.0 - _st.NormalDist(r["avg"], sd).cdf(pick["line"])
+        else:
+            p_over = r.get("hit_rate", 0.0)
+        r["p_over"]     = round(p_over, 3)
+        r["confidence"] = round(p_over, 3)
+        r["conf_pct"]   = round(p_over * 100)
+        r["home_away"]  = "home"
+        r["opp_team"]   = info.get("opp_abbr", "")
+        r["game_id"]    = pick.get("game_id", "")
+        r["pp_id"]      = pick.get("pp_id", "")
         cands.append(r)
-        time.sleep(0.02)
     # Rank: PRA over PR, then higher p_over, then stronger trend (all lifted
     # the rate in refinement: PRA 82%, p_over 0.80+ 94%, very-hot 92%).
     cands.sort(key=lambda x: (x.get("stat_type") == "Pts+Rebs+Asts",

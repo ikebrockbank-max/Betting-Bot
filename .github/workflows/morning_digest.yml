@@ -50,6 +50,7 @@ jobs:
           NTFY_TOPIC:        ${{ secrets.NTFY_TOPIC }}
           ODDS_API_KEY:      ${{ secrets.ODDS_API_KEY }}
           OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+          RAPIDAPI_KEY:      ${{ secrets.RAPIDAPI_KEY }}
           FORCE_RESEND:      ${{ github.event.inputs.force }}
         run: python3 morning_digest.py
       - name: Save sent-marker cache
