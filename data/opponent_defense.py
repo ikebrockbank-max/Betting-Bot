@@ -26,7 +26,17 @@ CACHE_TTL       = 3600  # 1 hour
 
 ESPN_WNBA_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard"
 ESPN_WNBA_SUMMARY    = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary"
-ESPN_HDRS            = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+# Full browser headers — a bare "Mozilla/5.0" UA is 403'd by ESPN's hidden
+# API from datacenter IPs (GitHub Actions), which broke WNBA context resolution.
+ESPN_HDRS            = {
+    "User-Agent":      ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept":          "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer":         "https://www.espn.com/",
+    "Origin":          "https://www.espn.com",
+}
 
 # ESPN box score stat name → our internal category key
 WNBA_BOX_STAT_MAP = {

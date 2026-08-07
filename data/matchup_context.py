@@ -34,6 +34,21 @@ NBA_HEADERS = {
     "Origin":             "https://www.nba.com",
 }
 
+# ESPN's hidden site API 403s a bare Mozilla UA from datacenter IPs (GitHub
+# Actions runners), which silently killed the WNBA-hot tier — every schedule
+# fetch returned 403 → no home/away → no stats → 0 picks ever. A full browser
+# UA plus espn.com Referer/Origin gets the runner past the block. (Try-A fix;
+# if ESPN blocks by IP rather than headers, switch to balldontlie.)
+ESPN_HEADERS = {
+    "User-Agent":      ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept":          "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer":         "https://www.espn.com/",
+    "Origin":          "https://www.espn.com",
+}
+
 def _get(url: str, headers: dict = None) -> dict:
     h = {"User-Agent": "Mozilla/5.0"}
     if headers:
@@ -565,7 +580,7 @@ def _get_wnba_roster(team_id: str) -> list[str]:
         _t.sleep(0.1)
         url  = (f"https://site.api.espn.com/apis/site/v2/sports/basketball/wnba"
                 f"/teams/{team_id}/roster")
-        data = _get(url)
+        data = _get(url, ESPN_HEADERS)
         names = [a.get("displayName", "")
                  for a in data.get("athletes", [])]
         _save(f"wnba_roster_{team_id}", names)
@@ -583,7 +598,7 @@ def _get_wnba_schedule(date_str: str) -> list[dict]:
         date_compact = date_str.replace("-", "")
         url  = (f"https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard"
                 f"?dates={date_compact}")
-        data = _get(url)
+        data = _get(url, ESPN_HEADERS)
         games = []
         for ev in data.get("events", []):
             comp  = ev.get("competitions", [{}])[0]
@@ -632,7 +647,7 @@ def _load_wnba_def_ratings() -> dict[str, dict]:
     try:
         url  = ("https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams"
                 "?limit=20")
-        data = _get(url)
+        data = _get(url, ESPN_HEADERS)
         sports  = data.get("sports", [{}])[0]
         leagues = sports.get("leagues", [{}])[0]
         teams   = leagues.get("teams", [])
@@ -650,7 +665,7 @@ def _load_wnba_def_ratings() -> dict[str, dict]:
             import time as _time
             _time.sleep(0.15)
             sr   = _get(f"https://site.api.espn.com/apis/site/v2/sports/basketball/wnba"
-                        f"/teams/{tid}/statistics")
+                        f"/teams/{tid}/statistics", ESPN_HEADERS)
             cats = sr.get("results", {}).get("stats", {}).get("categories", [])
 
             def _find(name):

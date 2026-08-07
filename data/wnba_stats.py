@@ -19,7 +19,19 @@ from pathlib import Path
 
 import requests
 
-ESPN_HEADERS     = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+# A bare "Mozilla/5.0" UA gets 403'd by ESPN's hidden API from datacenter IPs
+# (GitHub Actions runners) — this returned None for every WNBA player, which
+# is why get_stats_for_pick failed and the WNBA-hot tier scored 0 picks. Full
+# browser UA + espn.com Referer/Origin clears the block. (Try-A fix.)
+ESPN_HEADERS     = {
+    "User-Agent":      ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept":          "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer":         "https://www.espn.com/",
+    "Origin":          "https://www.espn.com",
+}
 CACHE_PATH       = Path("logs/.wnba_player_cache.json")
 STATS_CACHE_PATH = Path("logs/.wnba_stats_cache.json")
 STATS_CACHE_TTL  = 3600  # 1 hour (shorter — current season games update frequently)

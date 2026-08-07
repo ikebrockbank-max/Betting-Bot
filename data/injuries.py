@@ -14,9 +14,16 @@ Usage:
 import time
 import requests
 
+# Full browser headers with espn.com Referer/Origin — ESPN's hidden API 403s
+# thinner UAs from datacenter IPs (GitHub Actions), breaking the injury screen.
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-    "Accept": "application/json",
+    "User-Agent":      ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept":          "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer":         "https://www.espn.com/",
+    "Origin":          "https://www.espn.com",
 }
 
 _ESPN_URLS = {

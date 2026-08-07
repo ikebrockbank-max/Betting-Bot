@@ -37,7 +37,17 @@ NBA_HEADERS = {
     "x-nba-stats-token":   "true",
 }
 
-ESPN_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+# Full browser headers — a bare "Mozilla/5.0" UA is 403'd by ESPN's hidden
+# API from datacenter IPs (GitHub Actions), which broke WNBA home/away resolution.
+ESPN_HEADERS = {
+    "User-Agent":      ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/126.0.0.0 Safari/537.36"),
+    "Accept":          "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer":         "https://www.espn.com/",
+    "Origin":          "https://www.espn.com",
+}
 
 
 # ── Cache helpers ──────────────────────────────────────────────────────────────
