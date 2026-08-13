@@ -117,12 +117,12 @@ def build_digest():
 
     if era_under:
         lines.append("")
-        lines.append("⚾ ERA-UNDER (experimental, ~80% backtest — pitcher unders, mild parks):")
+        lines.append("⭐ ERA-UNDER STARS (pitcher unders, mild parks — ~80%, promoted):")
         for p in era_under:
             aw = " (away ✅)" if (p.get("home_away") or "").lower() == "away" else ""
             opp = (p.get("opp_team") or "").strip()
             opp_s = f" vs {opp.split()[-1]}" if opp and opp.lower() != "unknown" else ""
-            lines.append(f"⚾ {p['player']} UNDER {p['line']} "
+            lines.append(f"⭐ {p['player']} UNDER {p['line']} "
                          f"{p['stat_type'].replace(' (ERAunder)','')}{opp_s}{aw}")
 
     if runs_watch:
@@ -142,8 +142,12 @@ def build_digest():
     # (from backtests) still drive the win-% math. Spread across games to avoid
     # same-game correlation. 3 legs = best EV/variance balance.
     #   (tag, selection_priority, per_leg_prob, pick)
+    # ERA-under promoted to star tier (2026-08-13, user call): ticket-eligible
+    # at star conviction (0.80 backtest). Still logged/graded as (ERAunder) so
+    # its real live rate stays visible separately.
     cand = ([("🎯", 3, 0.80, p) for p in primes]
             + [("⭐", 2, 0.79, p) for p in stars]
+            + [("⭐", 2, 0.80, p) for p in era_under]
             + [("🔒", 1, 0.81, p) for p in locks])
     cand.sort(key=lambda x: (x[1], x[2]), reverse=True)
     # dedup by game_id where available so we don't stack one game
@@ -164,7 +168,8 @@ def build_digest():
         lines.append(f"🎫 SUGGESTED {len(picked)}-LEG TICKET (~{joint*100:.0f}% to cash "
                      f"— bet ONLY these, no extra legs):")
         for tag, pr, p in picked:
-            st = (p["stat_type"].replace(" (Goblin)", "").replace(" (WNBAhot)", ""))
+            st = (p["stat_type"].replace(" (Goblin)", "").replace(" (WNBAhot)", "")
+                  .replace(" (ERAunder)", ""))
             dr = "OVER" if p.get("direction") == "OVER" else "UNDER"
             lines.append(f"   {tag} {p['player']} {dr} {p['line']} {st}{l5(p)}")
 
