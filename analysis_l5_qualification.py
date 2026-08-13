@@ -67,7 +67,8 @@ def gamelog(player):
 
 def l5_count(player, pick_date, line):
     log = gamelog(player)
-    prior = sorted([(d, st) for d, st in log if d and d < pick_date])[-5:]
+    prior = sorted([(d, st) for d, st in log if d and d < pick_date],
+                   key=lambda x: x[0])[-5:]
     if len(prior) < 5:
         return None  # not enough history to judge
     cleared = 0
