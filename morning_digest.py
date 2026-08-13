@@ -17,7 +17,8 @@ from datetime import datetime, timezone, timedelta
 
 from daily_scorecard import build_scorecard
 from daily_top_picks import (get_top_picks, _find_locks, _find_runs_watch,
-                             _find_wnba_hot, _is_elite, _is_prime, _predicted_rate)
+                             _find_wnba_hot, _find_era_under,
+                             _is_elite, _is_prime, _predicted_rate)
 
 # Sent-today marker (persisted across runs via actions/cache), so the first
 # retry slot that succeeds sends and later slots exit — same pattern as the
@@ -64,6 +65,7 @@ def build_digest():
     locks = _find_locks(n=3)
     runs_watch = _find_runs_watch(n=2)
     wnba_hot = _find_wnba_hot(n=3)
+    era_under = _find_era_under(n=3)
 
     def pk(p):
         return float(p.get("park_factor", 0) or 0)
@@ -112,6 +114,16 @@ def build_digest():
         for p in wnba_hot:
             lines.append(f"🏀 {p['player']} OVER {p['line']} "
                          f"{p['stat_type'].replace(' (WNBAhot)','')}{vs_pit(p)}")
+
+    if era_under:
+        lines.append("")
+        lines.append("⚾ ERA-UNDER (experimental, ~80% backtest — pitcher unders, mild parks):")
+        for p in era_under:
+            aw = " (away ✅)" if (p.get("home_away") or "").lower() == "away" else ""
+            opp = (p.get("opp_team") or "").strip()
+            opp_s = f" vs {opp.split()[-1]}" if opp and opp.lower() != "unknown" else ""
+            lines.append(f"⚾ {p['player']} UNDER {p['line']} "
+                         f"{p['stat_type'].replace(' (ERAunder)','')}{opp_s}{aw}")
 
     if runs_watch:
         lines.append("")
@@ -177,6 +189,8 @@ def build_digest():
         for p in runs_watch:
             log_pick(p)
         for p in wnba_hot:
+            log_pick(p)
+        for p in era_under:
             log_pick(p)
     except Exception as e:
         print(f"[digest] calibration logging failed: {e}")

@@ -259,6 +259,64 @@ def _find_runs_watch(n: int = 2) -> list[dict]:
     return out
 
 
+def _find_era_under(n: int = 3) -> list[dict]:
+    """🅴 EXPERIMENTAL — Earned Runs Allowed UNDER by a starter in a MILD
+    pitcher park.
+
+    Edge-hunt find (2026-08-13, analysis_era_under_final.py). Definition:
+      Earned Runs Allowed, model direction UNDER, line == 2.5, park_factor in
+      [0.95, 1.0). Backtest 35/44 = 80%, era-stable (72% first half / 85%
+      second), Wilson LB 0.65, ~11 picks/week. These are REGULAR lines (not
+      goblin). Key refinements from the sweep:
+        • EXTREME pitcher parks (<0.95) are EXCLUDED — they drag to 57%; the
+          edge lives in mild parks, not the most extreme ones.
+        • line 1.5 excluded (coinflip, 50%); 2.5 is the pocket.
+        • AWAY starts hit 86% vs 73% home — flagged (ranked first) but not
+          required, so we keep the volume.
+      The model's own p_under/confidence isn't populated for these props, so
+      the edge is purely structural (park + line).
+
+    NEWER / less proven than Stars & Locks — logged with an " (ERAunder)"
+    suffix so it grades separately and never collides with a standard pick
+    (update_results strips the suffix for the box-score lookup).
+    """
+    import scanner_power_parlay as s
+    try:
+        lines = s.fetch_standard_lines(["MLB"])
+    except Exception as e:
+        _log(f"ERA-under fetch failed (non-fatal): {e}")
+        return []
+    cands = []
+    for pick in lines:
+        if pick.get("stat_type") != "Earned Runs Allowed":
+            continue
+        if float(pick.get("line", 0) or 0) != 2.5:      # 2.5 only — 1.5 is a coinflip
+            continue
+        stats = s.get_stats_for_pick(pick)
+        if not stats:
+            continue
+        r = s.score_pick(stats, pick)
+        if r.get("skip_reason") or r.get("direction") != "UNDER":
+            continue
+        pf = float(r.get("park_factor", 0) or 0)
+        if not (0.95 <= pf < 1.0):                       # mild pitcher parks only
+            continue
+        cands.append(r)
+        time.sleep(0.02)
+    # Rank: away first (86% vs 73%), then more run-suppressing (lower) park.
+    cands.sort(key=lambda x: (0 if (x.get("home_away") or "").lower() == "away" else 1,
+                              float(x.get("park_factor", 1) or 1)))
+    seen, out = set(), []
+    for p in cands:
+        if p["player"] not in seen:
+            seen.add(p["player"])
+            p["stat_type"] = f"{p['stat_type']} (ERAunder)"
+            out.append(p)
+        if len(out) >= n:
+            break
+    return out
+
+
 def _find_wnba_hot(n: int = 3) -> list[dict]:
     """🏀 WNBA HOT — the edge-hunt find (2026-08-05). Combo OVERs on hot
     players PERSIST (unlike MLB, where hot regresses) because WNBA combo

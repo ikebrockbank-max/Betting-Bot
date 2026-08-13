@@ -51,13 +51,25 @@ def build_scorecard(date=None) -> str:
         r["park_factor"] = _f(r, "park_factor")
         r["pitcher_tier"] = r.get("pitcher_tier") or ""
 
+    def _base_stat(st):
+        # Strip every tier suffix so the box-score lookup sees the real stat.
+        for suf in (" (Goblin)", " (WNBAhot)", " (RunsWatch)", " (ERAunder)"):
+            st = st.replace(suf, "")
+        return st
+
+    # grade() returns True/False (hit/miss), the sentinel "DNP" for a confirmed
+    # scratch/DNP (shown explicitly so voided picks don't silently vanish — a
+    # DNP is void, never a hit), or None when still unresolvable.
     def grade(r):
         if r.get("sport") == "MLB":
-            look = r["stat_type"].replace(" (Goblin)", "")
-            a = _fetch_actual_mlb(r["player"], look, date)
-            if a in (None, "DNP"):
+            a = _fetch_actual_mlb(r["player"], _base_stat(r["stat_type"]), date)
+            if a == "DNP":
+                return "DNP"
+            if a is None:
                 return None
             return (a > r["line"]) if r["direction"] == "OVER" else (a < r["line"])
+        if r.get("result") == "void":
+            return "DNP"
         if r.get("result") in ("hit", "miss"):
             return r["result"] == "hit"
         return None
@@ -69,8 +81,15 @@ def build_scorecard(date=None) -> str:
     # as morning_digest.build_digest.
     tiers = {"PRIME": [], "STAR": [], "LOCK": [], "gate": [], "all": []}
     star_detail = []
+    voids = []           # sent picks (star/prime/lock) that VOIDED on a DNP
     for r in rows:
         hit = grade(r)
+        if hit == "DNP":
+            # Surface DNP voids for the tiers the user actually bets, so a
+            # scratch shows as ⬜ VOID instead of silently dropping the count.
+            if _is_prime(r) or _is_elite(r) or _is_lock(r):
+                voids.append(r["player"].split()[-1])
+            continue
         if hit is None:
             continue
         tiers["all"].append(hit)
@@ -103,6 +122,8 @@ def build_scorecard(date=None) -> str:
             parts.append("✅ " + ", ".join(hits))
         if misses:
             parts.append("❌ " + ", ".join(misses))
+    if voids:
+        parts.append("⬜ VOID (DNP): " + ", ".join(sorted(set(voids))))
     return "\n".join(parts)
 
 
