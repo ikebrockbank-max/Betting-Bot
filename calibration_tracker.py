@@ -571,7 +571,7 @@ def update_results(target_date: str = None):
         # box-score lookup, which only knows real stat names. stat_key keeps
         # the suffix for row updates / local matching (see note above).
         stat     = (stat_key.replace(" (Goblin)", "").replace(" (RunsWatch)", "")
-                    .replace(" (WNBAhot)", ""))
+                    .replace(" (WNBAhot)", "").replace(" (ERAunder)", ""))
 
         actual = None
         if sport == "WNBA":
