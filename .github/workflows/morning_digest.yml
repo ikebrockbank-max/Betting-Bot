@@ -1,23 +1,25 @@
-name: Morning Brief (9 AM)
+name: Morning Brief (8 AM MDT)
 
 # ONE combined push: yesterday's scorecard + today's picks + today's locks.
-# Replaces the separate scorecard/picks morning pushes so the user gets a
-# single notification with everything (they were seeing a bare "Scorecard"
-# with no picks). Retry ladder + sent-today marker: first slot that gets
-# picks sends and marks; later slots exit. 9 AM MDT primary.
+# Retry ladder + sent-today marker: first slot that gets picks sends and marks;
+# later slots exit. TARGET: 8 AM MDT (= 14:00 UTC).
 
 on:
   schedule:
-    # GitHub's scheduler runs jobs ~2 HOURS late under load (14:37 slots were
-    # landing 17:00-19:00 UTC). Schedule ~2h EARLIER so the delayed run lands
-    # near 9 AM MDT. Star/Lock quality is unaffected by the early time — they
-    # key on the probable pitcher (known days ahead), not same-day lineups.
-    # Sent-today dedup means only the first successful slot actually sends.
-    - cron: '37 12 * * *'   # ~6:37 AM MDT — primary (absorbs ~2h delay → ~9 AM)
-    - cron: '52 12 * * *'   # retry 1
-    - cron: '17 13 * * *'   # retry 2
-    - cron: '47 13 * * *'   # retry 3
-    - cron: '43 15 * * *'   # late retry (firmer lineups)
+    # Target 8 AM MDT = 14:00 UTC. GitHub's cron is UNRELIABLE — observed
+    # firing 1-12h late (8/26 ~1h, 8/27 ~10h). Bias slots EARLY (11:30-14:00
+    # UTC = 5:30-8:00 AM MDT) so a typical delay still lands in the morning
+    # rather than the afternoon; being an hour or two early is fine — picks key
+    # on the probable pitcher (known days ahead), not same-day lineups. Slots
+    # are >=30 min apart so a delayed run's sent-marker cache has time to
+    # propagate before the next slot fires (fixes the 8/27 double-push).
+    # NOTE: cron alone can't beat GitHub's worst delays — a reliable external
+    # workflow_dispatch trigger (cron-job.org) is the durable fix.
+    - cron: '30 11 * * *'   # ~5:30 AM MDT — early primary (delay still lands AM)
+    - cron: '0 12 * * *'    # retry 1
+    - cron: '30 12 * * *'   # retry 2
+    - cron: '0 13 * * *'    # retry 3
+    - cron: '0 14 * * *'    # 8:00 AM MDT — catches on-time-firing days on target
   workflow_dispatch:
     inputs:
       force:
