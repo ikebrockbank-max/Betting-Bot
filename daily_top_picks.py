@@ -189,16 +189,18 @@ def _find_locks(n: int = 3) -> list[dict]:
         r = s.score_pick(stats, pick)
         if r.get("skip_reason") or r.get("direction") != "OVER":
             continue
-        # Soft-pitcher filter added 2026-07-30: on the resolved-lock sample,
-        # requiring a weak/below/average (non-ace, non-unknown) opposing
-        # pitcher lifted locks 73%→81% (13/16). The misses clustered on
-        # unknown/above-avg pitchers (Stott vs above_avg, several vs unknown).
-        # NOTE: NOT filtering on park_factor — for goblin (low) lines park>=1.0
-        # actually HURT (57% vs 73%); park matters for star lines, not these.
-        # Small sample (26 locks) — directional, will firm up with data.
+        # Soft-pitcher filter: require a WEAK or BELOW-AVERAGE opposing pitcher.
+        # Tightened 2026-09-21 (full-dataset edge hunt) — the "average" tier
+        # DECAYED and was dragging the tier down; the edge lives only vs
+        # genuinely soft arms:
+        #   weak      85% all-time / 81% last-30d (29/34)  ← crown jewel
+        #   below_avg 74% all-time / 71% last-30d (46/62)
+        #   average   75% all-time BUT 58% last-30d, 45% last-14d ← DROPPED
+        # (ace/above_avg/unknown were already excluded.) NOT filtering park —
+        # for goblin (low) lines park>=1.0 HURT (57% vs 73%).
         if ((r.get("p_over") or 0) >= 0.75
                 and (r.get("hit_rate") or 0) >= 0.80
-                and (r.get("pitcher_tier") or "") in ("weak", "below_avg", "average")):
+                and (r.get("pitcher_tier") or "") in ("weak", "below_avg")):
             locks.append(r)
         time.sleep(0.02)
     locks.sort(key=lambda x: x.get("p_over", 0), reverse=True)
