@@ -45,6 +45,63 @@ def _mark_sent():
         print(f"[digest] could not write marker: {e}")
 
 
+# ── Atomic once-a-day send lock (Supabase) ─────────────────────────────────────
+# The actions/cache marker only saves at job END, so two delayed cron slots that
+# fire minutes apart each see "not sent" and BOTH push — the 2-notifications bug.
+# Supabase is immediately consistent: we INSERT a per-day sentinel row into
+# pick_log, whose unique key (pick_date, player, stat_type) lets exactly ONE run
+# win; concurrent runs get HTTP 409 and stand down. Fails OPEN if Supabase is
+# unavailable so a local run still sends.
+_SB_URL = os.getenv("SUPABASE_URL", "https://gggozciyvjeqjnmufigp.supabase.co")
+_SB_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+_CLAIM = {"player": "__DIGEST_SENT__", "sport": "MARKER", "stat_type": "__marker__"}
+
+
+def _sb_headers():
+    return {"apikey": _SB_KEY, "Authorization": f"Bearer {_SB_KEY}",
+            "Content-Type": "application/json"}
+
+
+def _claim_send_slot() -> bool:
+    """True if THIS run won today's single send slot (safe to push), False if
+    another slot already claimed it. Plain INSERT (no on_conflict) so a duplicate
+    returns 409."""
+    if not _SB_KEY:
+        return True
+    import urllib.request as _r, urllib.error as _e
+    row = {**_CLAIM, "pick_date": _today_et(), "line": 0.0, "direction": "",
+           "confidence": 0, "resolved": True, "was_qualified": False}
+    req = _r.Request(f"{_SB_URL}/rest/v1/pick_log", data=json.dumps(row).encode(),
+                     headers={**_sb_headers(), "Prefer": "return=minimal"}, method="POST")
+    try:
+        _r.urlopen(req, timeout=10)
+        return True
+    except _e.HTTPError as ex:
+        if ex.code == 409:
+            return False
+        print(f"[digest] claim HTTP {ex.code}: {ex.read().decode()[:150]} — sending anyway")
+        return True
+    except Exception as ex:
+        print(f"[digest] claim failed ({ex}) — sending anyway")
+        return True
+
+
+def _release_send_slot():
+    """Delete today's sentinel so a later slot can retry — used only when the
+    push itself fails after we'd already claimed."""
+    if not _SB_KEY:
+        return
+    import urllib.request as _r
+    params = (f"pick_date=eq.{_today_et()}&player=eq.__DIGEST_SENT__"
+              f"&stat_type=eq.__marker__")
+    req = _r.Request(f"{_SB_URL}/rest/v1/pick_log?{params}",
+                     headers=_sb_headers(), method="DELETE")
+    try:
+        _r.urlopen(req, timeout=10)
+    except Exception as ex:
+        print(f"[digest] release failed ({ex})")
+
+
 def build_digest():
     lines = []
 
@@ -206,24 +263,28 @@ def build_digest():
 def main():
     force = os.getenv("FORCE_RESEND", "").lower() == "true"
     if _already_sent() and not force:
-        print("Digest already sent today — retry slot, exiting.")
+        print("Digest already sent today (local marker) — retry slot, exiting.")
         return
     body, n_stars, n_locks = build_digest()
     print(body)
-    # Only send + mark if we actually got today's picks (a blocked/empty scan
-    # produces the no-picks line — don't burn the marker so a later slot retries)
-    got_picks = n_stars > 0 or n_locks > 0
+    # Atomically claim today's single send slot BEFORE pushing, so two delayed
+    # cron slots can never both notify (the DB unique constraint is the arbiter,
+    # not the eventually-consistent actions/cache). force bypasses it.
+    if not force and not _claim_send_slot():
+        print("Digest already sent today (another slot claimed it) — exiting.")
+        return
     try:
         from notify import send_push
         title = f"🎯 Daily Brief — {n_stars} picks, {n_locks} locks"
         if send_push(body, title=title):
             print("\n[pushed via ntfy]")
-            if got_picks:
-                _mark_sent()
+            _mark_sent()
         else:
             print("\n[push FAILED]")
+            _release_send_slot()   # let a later slot retry
     except Exception as e:
         print(f"\n[push failed: {e}]")
+        _release_send_slot()
 
 
 if __name__ == "__main__":
